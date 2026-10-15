@@ -1,0 +1,3792 @@
+--==========================================================
+-- LegendUI hub
+--==========================================================
+
+----------------------------------------------------------
+-- 0. BOOTSTRAP
+----------------------------------------------------------
+
+local Env = (getgenv and getgenv()) or _G
+
+if Env.LegendCleanup then
+    pcall(Env.LegendCleanup)
+    Env.LegendCleanup = nil
+end
+
+local Cleanups = {}
+
+local function onCleanup(Fn)
+    table.insert(Cleanups, Fn)
+end
+
+Env.LegendCleanup = function()
+    for _, Fn in ipairs(Cleanups) do
+        pcall(Fn)
+    end
+end
+
+local LegendUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/csrust3-blip/testing/refs/heads/main/main.lua"))()
+
+----------------------------------------------------------
+-- 1. SERVICES + GAME MODULES
+----------------------------------------------------------
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local LocalPlayer = Players.LocalPlayer
+local Remote = ReplicatedStorage.Shared.Framework.Network.Remote
+local RemoteEvent = Remote.RemoteEvent
+local RemoteModule = require(Remote)
+local LocalData = require(ReplicatedStorage.Client.Framework.Services.LocalData)
+local ItemUtil = require(ReplicatedStorage.Shared.Utils.Stats.ItemUtil)
+local PetUtil = require(ReplicatedStorage.Shared.Utils.Stats.PetUtil)
+local FormatSuffix = require(ReplicatedStorage.Shared.Framework.Utilities.String.FormatSuffix)
+local FormatCommas = require(ReplicatedStorage.Shared.Framework.Utilities.String.FormatCommas)
+local Pets = require(ReplicatedStorage.Shared.Data.Pets)
+
+----------------------------------------------------------
+-- 2. CONFIG
+----------------------------------------------------------
+
+local Config = {
+    Webhooks = {
+        Evolve = "https://discord.com/api/webhooks/1555073868794830918/VnelpOvHm7JyXxIYuREDab5h9GlqN_f7BmyzoScnMJ1Af1O7SfUbX1VdSw2ovemBMYU5",
+        Kody = "https://discord.com/api/webhooks/1555074189038325782/A19GgeL1PPLSlFcapJzAMo3BFrO62c3-9Fs0_Ai9J1RTIkJ2PIz9-L8TryDxPpYTbpuQ",
+    },
+    RoleIds = {
+        Evolve = "1555074006384648262",
+        Kody = "1555074082700140544",
+    },
+    WebhookNames = {"Evolve", "Kody"},
+    StatusWebhook = "https://discord.com/api/webhooks/1556208245650104380/svZI_QcG1bVpJ85LF0zZAixWL_CDfW779wJVfzGAjOI_dHRJCc-2s8DxqqfiK7P1SM_H",
+    StatusRoleId = "",
+}
+
+----------------------------------------------------------
+-- 3. UI LAYOUT
+----------------------------------------------------------
+
+local Window = LegendUI:CreateWindow({
+    Title = "LegendUI",
+    SubText = LocalPlayer.Name,
+    SubText2 = "session",
+})
+
+local function addToggle(Box, Text, Default, Callback)
+    local Toggle = Box:AddToggle(Text, Default, nil, Callback)
+    if Toggle and Toggle.Swatch then
+        Toggle.Swatch.Visible = false
+    end
+    return Toggle
+end
+
+local FeaturesNav = Window:AddNavTab("Features")
+local FarmTab = Window:AddPageTab(FeaturesNav, "Farm")
+local WaypointsTab = Window:AddPageTab(FeaturesNav, "Waypoints")
+local WebhookTab = Window:AddPageTab(FeaturesNav, "Webhook")
+local ExtrasTab = Window:AddPageTab(FeaturesNav, "Extras")
+local StatsNav = Window:AddNavTab("Stats")
+local StatsTab = Window:AddPageTab(StatsNav, "Live Stats")
+
+local FarmLeft = FarmTab:AddColumn()
+local FarmRight = FarmTab:AddColumn()
+local WaypointsLeft = WaypointsTab:AddColumn()
+local WaypointsRight = WaypointsTab:AddColumn()
+local WebhookLeft = WebhookTab:AddColumn()
+local ExtrasLeft = ExtrasTab:AddColumn()
+local ExtrasRight = ExtrasTab:AddColumn()
+local StatsLeft = StatsTab:AddColumn()
+local StatsRight = StatsTab:AddColumn()
+
+local ShopBox = FarmLeft:AddBox("Shop Farm")
+local CollectablesBox = FarmRight:AddBox("Rendered Collectables")
+local GiftBox = FarmRight:AddBox("Gift Boxes")
+
+local WaypointBox = WaypointsLeft:AddBox("Waypoints")
+local WaypointSettingsBox = WaypointsRight:AddBox("Waypoint Movement")
+
+local WebhookBox = WebhookLeft:AddBox("Webhook Settings")
+
+local EnchantBox = ExtrasLeft:AddBox("Enchant Settings")
+local DebugBox = ExtrasRight:AddBox("Debug Prints")
+local MiscBox = ExtrasLeft:AddBox("Settings")
+local PlayerStatsBox = StatsLeft:AddBox("Player Leaderstats & Currency")
+local SessionStatsBox = StatsRight:AddBox("Session Statistics")
+
+----------------------------------------------------------
+-- DEBUG PRINT CONTROLS
+----------------------------------------------------------
+
+-- Debug output is opt-in every time the script starts.
+-- Reset any values left over from a previous execution.
+Env.DebugSettings = {
+    Waypoints = false,
+    Rebirth = false,
+    RenderedCollectables = false,
+    Eggs = false,
+    ShopFarm = false,
+    Gifts = false,
+    HatchWebhook = false,
+    StatusUpdates = false,
+    AutoEnchant = false,
+    Misc = false,
+    GeneralWarnings = false,
+}
+
+local DebugSettings = Env.DebugSettings
+local ForceDebugOutput = false
+local DebugToggles = {}
+
+local function debugPrint(Category, ...)
+    if ForceDebugOutput or DebugSettings[Category] then
+        print(...)
+    end
+end
+
+local function debugWarn(Category, ...)
+    if ForceDebugOutput or DebugSettings[Category] then
+        warn(...)
+    end
+end
+
+-- Run a manual diagnostic button with output forced on, without enabling
+-- that category's ongoing background debug messages.
+local function runDebugButton(Callback)
+    local Previous = ForceDebugOutput
+    ForceDebugOutput = true
+    local Success, Err = pcall(Callback)
+    ForceDebugOutput = Previous
+
+    if not Success then
+        warn("[LegendUI] Debug button failed:", Err)
+    end
+end
+
+local DebugCategories = {
+    {"Waypoints", "Waypoints"},
+    {"Rebirth", "Rebirth"},
+    {"Rendered Collectables", "RenderedCollectables"},
+    {"Egg Detector / Auto Hatch", "Eggs"},
+    {"Shop Farm", "ShopFarm"},
+    {"Gift Boxes", "Gifts"},
+    {"Hatch Webhook", "HatchWebhook"},
+    {"Status Updates", "StatusUpdates"},
+    {"Auto Enchant", "AutoEnchant"},
+    {"Miscellaneous", "Misc"},
+    {"General Warnings", "GeneralWarnings"},
+}
+
+for _, Entry in ipairs(DebugCategories) do
+    local Label = Entry[1]
+    local Category = Entry[2]
+
+    DebugToggles[Category] = addToggle(DebugBox, Label, false, function(Value)
+        DebugSettings[Category] = Value
+    end)
+end
+
+DebugBox:AddButton("Enable All Debug Messages", function()
+    for _, Entry in ipairs(DebugCategories) do
+        local Category = Entry[2]
+        DebugSettings[Category] = true
+        local Toggle = DebugToggles[Category]
+        if Toggle and type(Toggle.Set) == "function" then
+            pcall(Toggle.Set, Toggle, true)
+        elseif Toggle and type(Toggle.set) == "function" then
+            pcall(Toggle.set, Toggle, true)
+        end
+    end
+end)
+
+DebugBox:AddButton("Disable All Debug Messages", function()
+    for _, Entry in ipairs(DebugCategories) do
+        local Category = Entry[2]
+        DebugSettings[Category] = false
+        local Toggle = DebugToggles[Category]
+        if Toggle and type(Toggle.Set) == "function" then
+            pcall(Toggle.Set, Toggle, false)
+        elseif Toggle and type(Toggle.set) == "function" then
+            pcall(Toggle.set, Toggle, false)
+        end
+    end
+end)
+
+----------------------------------------------------------
+-- 4. SHARED HELPERS
+----------------------------------------------------------
+
+local function getRoot()
+    local Character = LocalPlayer.Character
+    return Character and Character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getObjectCFrame(Object)
+    if Object:IsA("Model") then
+        return Object:GetPivot()
+    elseif Object:IsA("BasePart") then
+        return Object.CFrame
+    end
+
+    local Part = Object:FindFirstChildWhichIsA("BasePart", true)
+    return Part and Part.CFrame
+end
+
+local Features = {}
+local ShopFarmManagedFeatures = {}
+
+local function registerShopFarmManagedFeature(Name, Toggle, IsEnabled)
+    table.insert(ShopFarmManagedFeatures, {
+        Name = Name,
+        Toggle = Toggle,
+        IsEnabled = IsEnabled,
+    })
+end
+
+local function setManagedToggle(Toggle, Value)
+    if not Toggle then return end
+
+    if type(Toggle.Set) == "function" then
+        local Ok = pcall(Toggle.Set, Toggle, Value)
+        if Ok then return end
+    end
+
+    if type(Toggle.set) == "function" then
+        pcall(Toggle.set, Toggle, Value)
+    end
+end
+
+local function suspendShopFarmManagedFeatures()
+    local SavedStates = {}
+
+    for _, Feature in ipairs(ShopFarmManagedFeatures) do
+        local Ok, WasEnabled = pcall(Feature.IsEnabled)
+
+        if Ok and WasEnabled then
+            SavedStates[Feature.Name] = true
+            setManagedToggle(Feature.Toggle, false)
+            debugPrint("ShopFarm", "[Shop Farm] Temporarily disabled:", Feature.Name)
+        end
+    end
+
+    return SavedStates
+end
+
+local function restoreShopFarmManagedFeatures(SavedStates)
+    for _, Feature in ipairs(ShopFarmManagedFeatures) do
+        if SavedStates and SavedStates[Feature.Name] then
+            setManagedToggle(Feature.Toggle, true)
+            debugPrint("ShopFarm", "[Shop Farm] Re-enabled:", Feature.Name)
+        end
+    end
+end
+
+local PriceSuffixes = {
+    K = 1e3,
+    M = 1e6,
+    B = 1e9,
+    T = 1e12,
+    QA = 1e15,
+    QI = 1e18,
+}
+
+local function parsePrice(Text)
+    local Clean = tostring(Text):gsub(",", ""):gsub("%s", "")
+    local Num, Suf = Clean:match("^([%d%.]+)(%a*)$")
+    Num = tonumber(Num)
+
+    if not Num then
+        return nil
+    end
+
+    return Num * (PriceSuffixes[Suf:upper()] or 1)
+end
+
+local function formatNumber(Number)
+    local Units = {
+        {1e18, "Qi"},
+        {1e15, "Qa"},
+        {1e12, "T"},
+        {1e9, "B"},
+        {1e6, "M"},
+        {1e3, "K"},
+    }
+
+    for _, Unit in ipairs(Units) do
+        if Number >= Unit[1] then
+            return string.format("%.2f%s", Number / Unit[1], Unit[2])
+        end
+    end
+
+    return string.format("%d", Number)
+end
+
+local function getPath(Root, ...)
+    local Current = Root
+
+    for _, Name in ipairs({...}) do
+        Current = Current and Current:FindFirstChild(Name)
+    end
+
+    return Current
+end
+
+local function isValidURL(URL)
+    return type(URL) == "string"
+        and URL ~= ""
+        and not URL:find("PASTE_NEW")
+end
+
+local function sendWebhook(URL, Payload)
+    local Requester = (syn and syn.request)
+        or (http and http.request)
+        or http_request
+        or request
+
+    if not Requester then
+        debugWarn("GeneralWarnings", "Webhook failed: executor has no request function")
+        return false
+    end
+
+    local Success, Response = pcall(Requester, {
+        Url = URL,
+        Method = "POST",
+        Headers = {["Content-Type"] = "application/json"},
+        Body = HttpService:JSONEncode(Payload)
+    })
+
+    if not Success then
+        debugWarn("GeneralWarnings", "Webhook request errored:", Response)
+        return false
+    end
+
+    local Code = Response and (Response.StatusCode or Response.Status)
+
+    if Code and Code >= 200 and Code < 300 then
+        debugPrint("HatchWebhook", "Webhook sent successfully!")
+        return true
+    end
+
+    debugWarn("GeneralWarnings", "Webhook rejected by Discord. Status:", Code, Response and Response.Body)
+    return false
+end
+
+----------------------------------------------------------
+-- 5.1 WAYPOINTS
+----------------------------------------------------------
+
+do
+    local Waypoints = {}
+    local WaypointMarkers = {}
+    local Moving = false
+    local CurrentWaypoint = 1
+    local MoveSpeed = 16
+    local WaitEnabled = false
+    local WaitTime = 5
+    local WaitUntil = 0
+    local ArrivalDistance = 3
+    local ShowWaypoints = true
+    local MovementConnection
+
+    local function setWaypointVisibility(IsVisible)
+        ShowWaypoints = IsVisible
+
+        for _, Marker in ipairs(WaypointMarkers) do
+            if Marker and Marker.Parent then
+                Marker.Transparency = IsVisible and 0.15 or 1
+
+                local Label = Marker:FindFirstChild("WaypointLabel", true)
+                if Label then
+                    Label.Enabled = IsVisible
+                end
+            end
+        end
+    end
+
+    local function createWaypointMarker(Position, Number)
+        local Marker = Instance.new("Part")
+        Marker.Name = "Waypoint_" .. Number
+        Marker.Shape = Enum.PartType.Ball
+        Marker.Size = Vector3.new(1.5, 1.5, 1.5)
+        Marker.Position = Position + Vector3.new(0, 1.5, 0)
+        Marker.Anchored = true
+        Marker.CanCollide = false
+        Marker.CanTouch = false
+        Marker.CanQuery = false
+        Marker.Material = Enum.Material.Neon
+        Marker.Color = Color3.fromRGB(236, 32, 160)
+        Marker.Transparency = ShowWaypoints and 0.15 or 1
+        Marker.Parent = workspace
+
+        local Billboard = Instance.new("BillboardGui")
+        Billboard.Name = "WaypointLabel"
+        Billboard.Size = UDim2.fromOffset(100, 35)
+        Billboard.StudsOffset = Vector3.new(0, 1.5, 0)
+        Billboard.AlwaysOnTop = true
+        Billboard.Enabled = ShowWaypoints
+        Billboard.Parent = Marker
+
+        local Text = Instance.new("TextLabel")
+        Text.Size = UDim2.fromScale(1, 1)
+        Text.BackgroundTransparency = 1
+        Text.Text = "Waypoint " .. Number
+        Text.TextColor3 = Color3.fromRGB(255, 255, 255)
+        Text.TextStrokeTransparency = 0
+        Text.TextScaled = true
+        Text.Font = Enum.Font.SourceSansBold
+        Text.Parent = Billboard
+
+        table.insert(WaypointMarkers, Marker)
+    end
+
+    local function clearWaypointMarkers()
+        for _, Marker in ipairs(WaypointMarkers) do
+            if Marker then
+                Marker:Destroy()
+            end
+        end
+
+        table.clear(WaypointMarkers)
+    end
+
+    local function stopMovement()
+        Moving = false
+        CurrentWaypoint = 1
+        WaitUntil = 0
+
+        if MovementConnection then
+            MovementConnection:Disconnect()
+            MovementConnection = nil
+        end
+
+        local Root = getRoot()
+
+        if Root then
+            local CurrentVelocity = Root.AssemblyLinearVelocity
+            Root.AssemblyLinearVelocity = Vector3.new(0, CurrentVelocity.Y, 0)
+        end
+
+        debugPrint("Waypoints", "Waypoint movement stopped")
+    end
+
+    local function walkWaypoints()
+        if #Waypoints == 0 then
+            debugWarn("Waypoints", "No waypoints have been set")
+            return
+        end
+
+        stopMovement()
+        Moving = true
+        CurrentWaypoint = 1
+
+        MovementConnection = RunService.Heartbeat:Connect(function()
+            if not Moving then
+                return
+            end
+
+            local Root = getRoot()
+
+            if not Root then
+                stopMovement()
+                return
+            end
+
+            if os.clock() < WaitUntil then
+                local CurrentVelocity = Root.AssemblyLinearVelocity
+                Root.AssemblyLinearVelocity = Vector3.new(0, CurrentVelocity.Y, 0)
+                return
+            end
+
+            local Target = Waypoints[CurrentWaypoint]
+
+            if not Target then
+                CurrentWaypoint = 1
+                Target = Waypoints[CurrentWaypoint]
+            end
+
+            local TargetPosition = Vector3.new(Target.X, Root.Position.Y, Target.Z)
+            local Offset = TargetPosition - Root.Position
+            local Distance = Offset.Magnitude
+
+            if Distance <= ArrivalDistance then
+                CurrentWaypoint += 1
+
+                if CurrentWaypoint > #Waypoints then
+                    CurrentWaypoint = 1
+                    debugPrint("Waypoints", "Returned to waypoint 1, looping again")
+                end
+
+                if WaitEnabled then
+                    WaitUntil = os.clock() + WaitTime
+                    debugPrint("Waypoints", "Waiting", WaitTime, "seconds at waypoint")
+                end
+
+                return
+            end
+
+            local Direction = Offset.Unit
+            local CurrentVelocity = Root.AssemblyLinearVelocity
+
+            Root.AssemblyLinearVelocity = Vector3.new(
+                Direction.X * MoveSpeed,
+                CurrentVelocity.Y,
+                Direction.Z * MoveSpeed
+            )
+        end)
+
+        debugPrint("Waypoints", "Waypoint loop started")
+    end
+
+    WaypointSettingsBox:AddSlider("Movement speed", 1, 20, MoveSpeed, function(Value)
+        MoveSpeed = Value
+    end)
+
+    addToggle(WaypointSettingsBox, "Wait at each waypoint", false, function(Value)
+        WaitEnabled = Value
+    end)
+
+    WaypointSettingsBox:AddSlider("Wait time (seconds)", 1, 60, WaitTime, function(Value)
+        WaitTime = Value
+    end)
+
+    addToggle(WaypointSettingsBox, "Show waypoint visuals", false, function(Value)
+        setWaypointVisibility(Value)
+    end)
+
+    addToggle(WaypointSettingsBox, "Walk waypoints", false, function(Value)
+        if Value then
+            walkWaypoints()
+        else
+            stopMovement()
+        end
+    end)
+
+    WaypointBox:AddButton("Set waypoint here", function()
+        local Root = getRoot()
+
+        if not Root then
+            debugWarn("Waypoints", "Character root not found")
+            return
+        end
+
+        table.insert(Waypoints, Root.Position)
+        createWaypointMarker(Root.Position, #Waypoints)
+
+        debugPrint("Waypoints", "Waypoint", #Waypoints, "set at", tostring(Root.Position))
+    end)
+
+    WaypointBox:AddButton("Create Circle Waypoints", function()
+        local Root = getRoot()
+
+        if not Root then
+            debugWarn("Waypoints", "Character root not found")
+            return
+        end
+
+        local Radius = 30
+        local WaypointCount = 12
+        local Center = Root.Position
+
+        for i = 1, WaypointCount do
+            local Angle = ((i - 1) / WaypointCount) * math.pi * 2
+            local Position = Center + Vector3.new(
+                math.cos(Angle) * Radius,
+                0,
+                math.sin(Angle) * Radius
+            )
+
+            table.insert(Waypoints, Position)
+            createWaypointMarker(Position, #Waypoints)
+        end
+
+        debugPrint("Waypoints", "Created", WaypointCount, "circle waypoints with radius", Radius)
+    end)
+
+    WaypointBox:AddButton("Clear waypoints", function()
+        stopMovement()
+        table.clear(Waypoints)
+        clearWaypointMarkers()
+        debugPrint("Waypoints", "All waypoints cleared")
+    end)
+
+    onCleanup(function()
+        stopMovement()
+        clearWaypointMarkers()
+    end)
+end
+
+----------------------------------------------------------
+-- 5.2 REBIRTH
+----------------------------------------------------------
+
+do
+    local SpamRebirth = false
+
+    local SpamRebirthToggle = addToggle(CollectablesBox, "Spam Rebirth", false, function(Value)
+        SpamRebirth = Value
+
+        if SpamRebirth then
+            task.spawn(function()
+                while SpamRebirth do
+                    RemoteEvent:FireServer("HalloweenRebirth")
+                    task.wait()
+                end
+            end)
+        end
+    end)
+
+    registerShopFarmManagedFeature("Spam Rebirth", SpamRebirthToggle, function()
+        return SpamRebirth
+    end)
+
+    onCleanup(function()
+        SpamRebirth = false
+    end)
+end
+
+----------------------------------------------------------
+-- 5.3 RENDERED COLLECTABLES
+----------------------------------------------------------
+
+do
+    local RenderedIndex = 15
+    local RenderedTp = false
+    local RenderedTpRunning = false
+
+    local function getRenderedTarget()
+        local Rendered = workspace:FindFirstChild("Rendered")
+        return Rendered and Rendered:GetChildren()[RenderedIndex]
+    end
+
+    CollectablesBox:AddButton("Print Rendered children", function()
+        runDebugButton(function()
+            local Rendered = workspace:FindFirstChild("Rendered")
+
+            if not Rendered then
+                debugWarn("RenderedCollectables", "workspace.Rendered not found")
+                return
+            end
+
+            for Index, Child in ipairs(Rendered:GetChildren()) do
+                debugPrint(
+                    "RenderedCollectables",
+                    Index,
+                    Child.Name,
+                    Child.ClassName,
+                    Index == RenderedIndex and "<-- target" or ""
+                )
+            end
+        end)
+    end)
+
+    local function setRenderedTp(Value)
+        RenderedTp = Value
+
+        if not RenderedTp or RenderedTpRunning then
+            return
+        end
+
+        RenderedTpRunning = true
+
+        task.spawn(function()
+            local WarnedEmpty = false
+
+            while RenderedTp do
+                local Target = getRenderedTarget()
+                local Children = Target and Target:GetChildren() or {}
+
+                if #Children == 0 then
+                    if not WarnedEmpty then
+                        debugWarn(
+                            "RenderedCollectables",
+                            "Rendered TP: nothing found in workspace.Rendered:GetChildren()[" .. RenderedIndex .. "]"
+                        )
+                        WarnedEmpty = true
+                    end
+                else
+                    WarnedEmpty = false
+                end
+
+                for _, Child in ipairs(Children) do
+                    if not RenderedTp then
+                        break
+                    end
+
+                    if Child.Parent then
+                        local TargetCFrame = getObjectCFrame(Child)
+                        local Character = LocalPlayer.Character
+
+                        if TargetCFrame and Character then
+                            Character:PivotTo(TargetCFrame + Vector3.new(0, 3, 0))
+                            task.wait()
+                        end
+                    end
+                end
+
+                task.wait(0.1)
+            end
+
+            RenderedTpRunning = false
+        end)
+    end
+
+    local RenderedToggle = addToggle(
+        CollectablesBox,
+        "TP through Rendered children",
+        false,
+        setRenderedTp
+    )
+
+    Features.RenderedTp = {
+        Toggle = RenderedToggle,
+        SetEnabled = setRenderedTp,
+        IsEnabled = function()
+            return RenderedTp
+        end,
+    }
+
+    onCleanup(function()
+        RenderedTp = false
+    end)
+end
+
+----------------------------------------------------------
+-- 5.4b SHOP FARM
+----------------------------------------------------------
+
+do
+    local CURRENCY_NAME = "Candycorn26"
+    local START_WHEN = "any"
+    local CHECK_INTERVAL = 1
+    local STATUS_INTERVAL = 5
+    local EXTRA_BUFFER = 8e9
+    local OUT_OF_STOCK_TEXT = "out of stock"
+    local DISABLE_TOGGLE_WHEN_DONE = true
+
+    local ShopEnabled = false
+    local ShopSession = 0
+    local Farming = false
+    local ShopToggle
+    local OriginalPlayerPivot = nil
+    local SuspendedFeatureStates = nil
+
+    local FarmingTeam = 7
+    local RestoreTeam = 1
+
+    local function equipTeam(TeamNumber)
+        TeamNumber = tonumber(TeamNumber)
+
+        if not TeamNumber or TeamNumber < 1 or TeamNumber > 13 then
+            debugWarn("ShopFarm", "[Shop Farm] Invalid team number:", TeamNumber)
+            return
+        end
+
+        local Success, Err = pcall(function()
+            RemoteEvent:FireServer("EquipTeam", TeamNumber)
+        end)
+
+        if not Success then
+            debugWarn("ShopFarm", "[Shop Farm] Failed to equip team:", Err)
+        else
+            debugPrint("ShopFarm", "[Shop Farm] Requested team:", TeamNumber)
+        end
+    end
+
+    local function getPlayerGui()
+        return LocalPlayer:FindFirstChild("PlayerGui")
+    end
+
+    local function setFeature(Feature, Value)
+        if not Feature then
+            return
+        end
+
+        Feature.SetEnabled(Value)
+
+        if Feature.Toggle and Feature.Toggle.Set then
+            pcall(Feature.Toggle.Set, Feature.Toggle, Value)
+        end
+    end
+
+    local function readShop()
+        local ScrollingFrame = getPath(
+            getPlayerGui(),
+            "ScreenGui",
+            "ItemShop",
+            "Frame",
+            "Main",
+            "ScrollingFrame"
+        )
+
+        if not ScrollingFrame then
+            return nil
+        end
+
+        local Shop = {
+            Count = 0,
+            InStock = 0,
+            Total = 0,
+            Unreadable = 0,
+        }
+
+        for _, Item in ipairs(ScrollingFrame:GetChildren()) do
+            if Item.Name:match("^Item%d+$") then
+                local StockLabel = Item:FindFirstChild("Stock")
+
+                if StockLabel then
+                    Shop.Count += 1
+
+                    if not StockLabel.Text:lower():find(OUT_OF_STOCK_TEXT, 1, true) then
+                        Shop.InStock += 1
+
+                        local PriceLabel = getPath(
+                            Item,
+                            "Buttons",
+                            "BuyAll",
+                            "Button",
+                            "Frame",
+                            "Label"
+                        )
+
+                        local Price = PriceLabel and parsePrice(PriceLabel.Text)
+
+                        if Price then
+                            Shop.Total += Price
+                        else
+                            Shop.Unreadable += 1
+                        end
+                    end
+                end
+            end
+        end
+
+        return Shop
+    end
+
+    local function readCurrency()
+        local Label = getPath(
+            getPlayerGui(),
+            "ScreenGui",
+            "HUD",
+            "Left",
+            "Currency",
+            CURRENCY_NAME,
+            "Frame",
+            "Label"
+        )
+
+        return Label and parsePrice(Label.Text)
+    end
+
+    local function describePath(Root, ...)
+        local Current = Root
+        local Walked = {}
+
+        for _, Name in ipairs({...}) do
+            local Next = Current and Current:FindFirstChild(Name)
+
+            if not Next then
+                return false, table.concat(Walked, ".") .. " -> missing '" .. Name .. "'"
+            end
+
+            Current = Next
+            table.insert(Walked, Name)
+        end
+
+        return true, Current
+    end
+
+    local function explainMissing()
+        local Parts = {}
+
+        local ShopOk, ShopInfo = describePath(
+            getPlayerGui(),
+            "ScreenGui",
+            "ItemShop",
+            "Frame",
+            "Main",
+            "ScrollingFrame"
+        )
+
+        if not ShopOk then
+            table.insert(Parts, "shop path broke at: " .. ShopInfo)
+        end
+
+        local CurOk, CurInfo = describePath(
+            getPlayerGui(),
+            "ScreenGui",
+            "HUD",
+            "Left",
+            "Currency",
+            CURRENCY_NAME,
+            "Frame",
+            "Label"
+        )
+
+        if not CurOk then
+            table.insert(Parts, "currency path broke at: " .. CurInfo)
+        end
+
+        if #Parts == 0 then
+            table.insert(
+                Parts,
+                "paths exist, but no item has a Stock label or the currency text isn't readable"
+            )
+        end
+
+        return table.concat(Parts, " | ")
+    end
+
+    local function printShopStatus()
+        debugPrint("ShopFarm", "[Shop Farm] ---------- status ----------")
+
+        local ScrollingFrame = getPath(
+            getPlayerGui(),
+            "ScreenGui",
+            "ItemShop",
+            "Frame",
+            "Main",
+            "ScrollingFrame"
+        )
+
+        if not ScrollingFrame then
+            debugWarn("ShopFarm", "[Shop Farm] " .. explainMissing())
+        else
+            local Items = {}
+
+            for _, Item in ipairs(ScrollingFrame:GetChildren()) do
+                if Item.Name:match("^Item%d+$") then
+                    table.insert(Items, Item)
+                end
+            end
+
+            table.sort(Items, function(a, b)
+                return tonumber(a.Name:match("%d+")) < tonumber(b.Name:match("%d+"))
+            end)
+
+            for _, Item in ipairs(Items) do
+                local Stock = Item:FindFirstChild("Stock")
+                local Price = getPath(Item, "Buttons", "BuyAll", "Button", "Frame", "Label")
+
+                debugPrint(
+                    "ShopFarm",
+                    ("%s | Stock: %s | BuyAll price: %s"):format(
+                        Item.Name,
+                        Stock and ("'" .. Stock.Text .. "'") or "NO Stock label",
+                        Price and ("'" .. Price.Text .. "'") or "NO price label"
+                    )
+                )
+            end
+        end
+
+        local CurLabel = getPath(
+            getPlayerGui(),
+            "ScreenGui",
+            "HUD",
+            "Left",
+            "Currency",
+            CURRENCY_NAME,
+            "Frame",
+            "Label"
+        )
+
+        debugPrint(
+            "ShopFarm",
+            "[Shop Farm] Currency label:",
+            CurLabel and ("'" .. CurLabel.Text .. "'") or "NOT FOUND"
+        )
+
+        local Shop = readShop()
+        local Currency = readCurrency()
+
+        if Shop then
+            debugPrint(
+                "ShopFarm",
+                ("[Shop Farm] Parsed: %d/%d in stock, total needed %s, currency %s"):format(
+                    Shop.InStock,
+                    Shop.Count,
+                    formatNumber(Shop.Total),
+                    Currency and formatNumber(Currency) or "unreadable"
+                )
+            )
+        end
+    end
+
+    local function startFarming()
+        if Farming then
+            return
+        end
+
+        Farming = true
+
+        local Character = LocalPlayer.Character
+        OriginalPlayerPivot = Character and Character:GetPivot() or nil
+
+        SuspendedFeatureStates = suspendShopFarmManagedFeatures()
+        setFeature(Features.AutoHatch, false)
+
+        task.wait(0.2)
+        if not Farming then return end
+
+        equipTeam(FarmingTeam)
+
+        task.wait(0.2)
+        if not Farming then return end
+
+        setFeature(Features.RenderedTp, true)
+
+        debugPrint("ShopFarm", "[Shop Farm] Farming started with team:", FarmingTeam)
+    end
+
+    local function stopFarming()
+        if not Farming then
+            return
+        end
+
+        Farming = false
+        setFeature(Features.RenderedTp, false)
+
+        task.wait(0.2)
+        equipTeam(RestoreTeam)
+
+        task.wait(0.2)
+
+        local Character = LocalPlayer.Character
+
+        if Character and OriginalPlayerPivot then
+            pcall(function()
+                Character:PivotTo(OriginalPlayerPivot)
+            end)
+
+            debugPrint("ShopFarm", "[Shop Farm] Returned to the starting position")
+        end
+
+        OriginalPlayerPivot = nil
+
+        local StatesToRestore = SuspendedFeatureStates
+        SuspendedFeatureStates = nil
+
+        restoreShopFarmManagedFeatures(StatesToRestore)
+
+        debugPrint("ShopFarm", "[Shop Farm] Restored team:", RestoreTeam)
+    end
+
+    local function finish(Reason)
+        debugPrint("ShopFarm", "[Shop Farm] Done: " .. Reason)
+        stopFarming()
+
+        if DISABLE_TOGGLE_WHEN_DONE then
+            ShopEnabled = false
+            ShopSession += 1
+
+            if ShopToggle and ShopToggle.Set then
+                pcall(ShopToggle.Set, ShopToggle, false)
+            end
+        end
+    end
+
+    local function startWatcher()
+        ShopSession += 1
+        local Session = ShopSession
+
+        task.spawn(function()
+            local WarnedMissing = false
+            local NotifiedEnough = false
+            local LastProgress = 0
+            local LastStatus = 0
+
+            while ShopEnabled and Session == ShopSession do
+                local Shop = readShop()
+                local Currency = readCurrency()
+
+                if not Shop or Shop.Count == 0 or not Currency then
+                    if not WarnedMissing then
+                        debugWarn(
+                            "ShopFarm",
+                            "[Shop Farm] Can't read the shop/currency: " .. explainMissing()
+                        )
+                        WarnedMissing = true
+                    end
+                else
+                    WarnedMissing = false
+
+                    local Target = Shop.Total + EXTRA_BUFFER
+
+                    if Shop.Unreadable > 0 then
+                        debugWarn(
+                            "ShopFarm",
+                            ("[Shop Farm] Couldn't read the price of %d item(s); they aren't counted"):format(
+                                Shop.Unreadable
+                            )
+                        )
+                    end
+
+                    if not Farming then
+                        local Stocked = (START_WHEN == "all" and Shop.InStock == Shop.Count)
+                            or (START_WHEN == "any" and Shop.InStock > 0)
+
+                        if not Stocked then
+                            NotifiedEnough = false
+
+                            if os.clock() - LastStatus >= STATUS_INTERVAL then
+                                LastStatus = os.clock()
+
+                                debugPrint(
+                                    "ShopFarm",
+                                    ("[Shop Farm] Waiting: %d/%d items in stock (need %s), currency %s"):format(
+                                        Shop.InStock,
+                                        Shop.Count,
+                                        START_WHEN == "all" and "all of them" or "at least 1",
+                                        formatNumber(Currency)
+                                    )
+                                )
+                            end
+                        elseif Currency >= Target then
+                            if not NotifiedEnough then
+                                NotifiedEnough = true
+
+                                debugPrint(
+                                    "ShopFarm",
+                                    ("[Shop Farm] Shop is stocked and you already have enough (%s / %s)"):format(
+                                        formatNumber(Currency),
+                                        formatNumber(Target)
+                                    )
+                                )
+                            end
+                        else
+                            NotifiedEnough = false
+
+                            debugPrint(
+                                "ShopFarm",
+                                ("[Shop Farm] Shop stocked, farming %s / %s"):format(
+                                    formatNumber(Currency),
+                                    formatNumber(Target)
+                                )
+                            )
+
+                            startFarming()
+                            LastProgress = os.clock()
+                        end
+                    else
+                        if Shop.InStock == 0 then
+                            finish("everything is out of stock")
+                        elseif Currency >= Target then
+                            finish(
+                                ("enough currency (%s / %s)"):format(
+                                    formatNumber(Currency),
+                                    formatNumber(Target)
+                                )
+                            )
+                        elseif os.clock() - LastProgress >= 10 then
+                            LastProgress = os.clock()
+
+                            debugPrint(
+                                "ShopFarm",
+                                ("[Shop Farm] Farming %s / %s"):format(
+                                    formatNumber(Currency),
+                                    formatNumber(Target)
+                                )
+                            )
+                        end
+                    end
+                end
+
+                task.wait(CHECK_INTERVAL)
+            end
+        end)
+    end
+
+    ShopBox:AddSlider("Extra buffer (billions)", 0, 50, EXTRA_BUFFER / 1e9, function(Value)
+        EXTRA_BUFFER = Value * 1e9
+    end)
+
+    ShopBox:AddDropdown(
+        "Start when",
+        {"All items stocked", "Any item stocked"},
+        "Any item stocked",
+        function(Value)
+            START_WHEN = (Value == "Any item stocked") and "any" or "all"
+        end
+    )
+
+    local TeamOptions = {}
+
+    for TeamNumber = 1, 13 do
+        TeamOptions[TeamNumber] = tostring(TeamNumber)
+    end
+
+    ShopBox:AddDropdown("Farming team", TeamOptions, tostring(FarmingTeam), function(Value)
+        FarmingTeam = tonumber(Value) or FarmingTeam
+        debugPrint("ShopFarm", "[Shop Farm] Farming team set to:", FarmingTeam)
+    end)
+
+    ShopBox:AddDropdown("Luck team", TeamOptions, tostring(RestoreTeam), function(Value)
+        RestoreTeam = tonumber(Value) or RestoreTeam
+        debugPrint("ShopFarm", "[Shop Farm] Restore team set to:", RestoreTeam)
+    end)
+
+    ShopToggle = addToggle(ShopBox, "Auto farm shop currency", false, function(Value)
+        ShopEnabled = Value
+
+        debugPrint(
+            "ShopFarm",
+            "[Shop Farm] " .. (Value and "enabled, watching the shop..." or "disabled")
+        )
+
+        if Value then
+            startWatcher()
+        else
+            ShopSession += 1
+            stopFarming()
+        end
+    end)
+
+    ShopBox:AddButton("Print shop status", function()
+        runDebugButton(printShopStatus)
+    end)
+
+    onCleanup(function()
+        ShopEnabled = false
+        ShopSession += 1
+        stopFarming()
+    end)
+end
+
+----------------------------------------------------------
+-- 5.5 GIFTS
+----------------------------------------------------------
+
+do
+    local GiftKey = Enum.KeyCode.G
+    local UseToggle
+    local AutoClaimGifts = false
+    local AutoClaimGiftsRunning = false
+    local AutoUseGifts = false
+    local AutoUseGiftsRunning = false
+    local UseGiftName = "Admin Mystery Box"
+    local UseGiftAmount = 50
+
+    local GiftOptions = {
+        "1 Billion Mystery Box",
+        "Admin Mystery Box",
+        "Circus Mystery Box",
+        "Fall Mystery Box",
+        "Festival Mystery Box",
+        "Guild Mystery Box",
+        "Infinity Mystery Box",
+        "Mystery Box",
+        "OG Mystery Box",
+        "Shadow Mystery Box",
+        "Spooky Mystery Box",
+        "Spring Mystery Box",
+        "Thanksgiving Mystery Box",
+    }
+
+    local function findGiftBoxes()
+        local GiftBoxes = {}
+        local Rendered = workspace:FindFirstChild("Rendered")
+        local Gifts = Rendered and Rendered:FindFirstChild("Gifts")
+
+        if not Gifts then
+            return GiftBoxes
+        end
+
+        for _, Gift in ipairs(Gifts:GetChildren()) do
+            table.insert(GiftBoxes, Gift)
+        end
+
+        return GiftBoxes
+    end
+
+    local function clickOnce()
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+    end
+
+    local ClaimToggle = addToggle(
+        GiftBox,
+        "Auto Claim Gift Boxes [" .. GiftKey.Name .. "]",
+        false,
+        function(Value)
+            AutoClaimGifts = Value
+
+            if not AutoClaimGifts or AutoClaimGiftsRunning then
+                return
+            end
+
+            AutoClaimGiftsRunning = true
+
+            task.spawn(function()
+                while AutoClaimGifts do
+                    if #findGiftBoxes() > 0 then
+                        clickOnce()
+                    end
+
+                    task.wait()
+                end
+
+                AutoClaimGiftsRunning = false
+            end)
+        end
+    )
+
+    registerShopFarmManagedFeature("Auto Claim Gift Boxes", ClaimToggle, function()
+        return AutoClaimGifts
+    end)
+
+    local ClaimKeyConnection = UserInputService.InputBegan:Connect(function(Input, Processed)
+        if Processed or Input.KeyCode ~= GiftKey then
+            return
+        end
+
+        if AutoClaimGifts or AutoUseGifts then
+            AutoClaimGifts = false
+            AutoUseGifts = false
+
+            if ClaimToggle then ClaimToggle:Set(false) end
+            if UseToggle then UseToggle:Set(false) end
+
+            debugPrint("Gifts", "[Gifts] " .. GiftKey.Name .. " pressed: both gift toggles turned off")
+        elseif ClaimToggle then
+            ClaimToggle:Set(true)
+        end
+    end)
+
+    GiftBox:AddDropdown("Gift to use", GiftOptions, UseGiftName, function(Value)
+        UseGiftName = Value
+    end)
+
+    GiftBox:AddSlider("Use amount", 1, 500, UseGiftAmount, function(Value)
+        UseGiftAmount = Value
+    end)
+
+    UseToggle = addToggle(
+        GiftBox,
+        "Auto Use Selected Gift [" .. GiftKey.Name .. "]",
+        false,
+        function(Value)
+            AutoUseGifts = Value
+
+            if not AutoUseGifts or AutoUseGiftsRunning then
+                return
+            end
+
+            AutoUseGiftsRunning = true
+
+            task.spawn(function()
+                while AutoUseGifts do
+                    RemoteEvent:FireServer("UseGift", UseGiftName, UseGiftAmount)
+                    task.wait(1)
+                end
+
+                AutoUseGiftsRunning = false
+            end)
+        end
+    )
+
+    registerShopFarmManagedFeature("Auto Use Selected Gift", UseToggle, function()
+        return AutoUseGifts
+    end)
+
+    onCleanup(function()
+        AutoClaimGifts = false
+        AutoUseGifts = false
+        ClaimKeyConnection:Disconnect()
+    end)
+end
+
+----------------------------------------------------------
+-- 5.6 HATCH WEBHOOK
+----------------------------------------------------------
+
+do
+    local RarityOrder = {
+        Legendary = 1,
+        SuperLegendary = 2,
+        Secret = 3,
+        Infinity = 4
+    }
+
+    local function rarityLevel(Name)
+        return RarityOrder[(tostring(Name):gsub("%s+", ""))] or 0
+    end
+
+    local SelectedWebhook = "Evolve"
+    local SelectedRarity = "Super Legendary"
+    local WebhookEnabled = false
+    local WebhookConnection
+    -- Session counters reset whenever this script is executed.
+    Env.HatchStatsSessionStartedAt = os.clock()
+    Env.HatchStatsWebhookPosts = 0
+    Env.HatchStatsPetsHatched = 0
+
+    local function getThumbnail(Image)
+        local ImageURL
+
+        pcall(function()
+            local AssetId = tostring(Image):match("%d+")
+
+            if AssetId then
+                local ThumbnailData = HttpService:JSONDecode(
+                    game:HttpGet(
+                        "https://thumbnails.roblox.com/v1/assets?assetIds="
+                        .. AssetId
+                        .. "&size=420x420&format=Png"
+                    )
+                )
+
+                if ThumbnailData.data and ThumbnailData.data[1] then
+                    ImageURL = ThumbnailData.data[1].imageUrl
+                end
+            end
+        end)
+
+        return ImageURL
+    end
+
+    local function handleHatch(Data)
+        if not WebhookEnabled or not Data or not Data.Pets then
+            return
+        end
+
+        Env.HatchStatsPetsHatched = (Env.HatchStatsPetsHatched or 0) + #Data.Pets
+
+        local DataInfo = LocalData:Get()
+        local Embeds = {}
+        local MinimumLevel = rarityLevel(SelectedRarity)
+
+        for _, PetData in Data.Pets do
+            local Rarity = ItemUtil:GetRarity(PetData.Pet)
+            local PetRarityLevel = rarityLevel(Rarity)
+            local Name = ItemUtil:GetName(PetData.Pet)
+            local Chance = PetUtil:GetChance(PetData.Pet)
+            local IsSuper = PetData.Pet.Super and true or false
+            local EffectiveLevel = PetRarityLevel
+
+            if IsSuper and EffectiveLevel == 1 then
+                EffectiveLevel = 2
+            end
+
+            if EffectiveLevel >= MinimumLevel then
+                local Pet = Pets[PetData.Pet.Name]
+
+                if Pet then
+                    local Stats = {}
+
+                    for StatName, StatValue in PetUtil:GetStats(PetData.Pet) do
+                        Stats[#Stats + 1] = "> " .. StatName .. ": " .. FormatCommas(math.floor(StatValue))
+                    end
+
+                    local Image = Pet.Images.Normal
+
+                    if PetData.Pet.Mythic then
+                        Image = PetData.Pet.Shiny and Pet.Images.MythicShiny or Pet.Images.Mythic
+                    elseif PetData.Pet.Shiny then
+                        Image = Pet.Images.Shiny
+                    end
+
+                    local Embed = {
+                        title = ((IsSuper and not tostring(Name):lower():find("^super")) and "Super " or "")
+                            .. Name .. " Pet Hatched (Odds 1/" .. FormatSuffix(math.ceil(100 / Chance)) .. ")",
+                        description = "Total Hatches: **" .. FormatCommas(DataInfo.Stats.Hatches)
+                            .. "**\nRarity: **" .. tostring(Rarity) .. "**\n"
+                            .. table.concat(Stats, "\n"),
+                        color = 0xFF0000
+                    }
+
+                    local ImageURL = getThumbnail(Image)
+
+                    if ImageURL then
+                        Embed.thumbnail = {url = ImageURL}
+                    end
+
+                    table.insert(Embeds, Embed)
+                end
+            end
+        end
+
+        if #Embeds == 0 then
+            return
+        end
+
+        local URL = Config.Webhooks[SelectedWebhook]
+        local Role = Config.RoleIds[SelectedWebhook]
+
+        if not isValidURL(URL) then
+            debugWarn("HatchWebhook", "No valid webhook URL set for", SelectedWebhook)
+            return
+        end
+
+        local Payload = {
+            content = (Role and Role ~= "") and ("<@&" .. Role .. ">") or "",
+            embeds = Embeds
+        }
+
+        if Role and Role ~= "" then
+            Payload.allowed_mentions = {roles = {Role}}
+        end
+
+        if sendWebhook(URL, Payload) then
+            Env.HatchStatsWebhookPosts = (Env.HatchStatsWebhookPosts or 0) + 1
+        end
+    end
+
+    WebhookBox:AddDropdown("Select Webhook", Config.WebhookNames, "Evolve", function(Value)
+        SelectedWebhook = Value
+    end)
+
+    WebhookBox:AddDropdown(
+        "Minimum Rarity",
+        {"Super Legendary", "Secret", "Infinity"},
+        "Super Legendary",
+        function(Value)
+            SelectedRarity = Value
+        end
+    )
+
+    addToggle(WebhookBox, "Enable Webhook Notifications", false, function(Value)
+        WebhookEnabled = Value
+        Env.HatchWebhookEnabled = Value
+
+        if WebhookEnabled and not WebhookConnection then
+            WebhookConnection = RemoteModule.Event("HatchEgg"):Connect(function(Data)
+                task.spawn(handleHatch, Data)
+            end)
+        end
+    end)
+
+    WebhookBox:AddButton("Send Test Webhook", function()
+        local URL = Config.Webhooks[SelectedWebhook]
+
+        if not isValidURL(URL) then
+            debugWarn("HatchWebhook", "No valid webhook URL set for", SelectedWebhook)
+            return
+        end
+
+        sendWebhook(URL, {
+            content = "",
+            embeds = {{
+                title = "Webhook test",
+                description = "If you can see this, the webhook works.",
+                color = 0x00FF00
+            }}
+        })
+    end)
+
+    onCleanup(function()
+        WebhookEnabled = false
+
+        if WebhookConnection then
+            WebhookConnection:Disconnect()
+            WebhookConnection = nil
+        end
+    end)
+end
+
+----------------------------------------------------------
+-- 5.7 AUTO ENCHANT
+----------------------------------------------------------
+-- The game's UseShadowCrystal call takes ONE lock slot (a number) or nil, so only
+-- one enchant can be protected at a time.
+--
+-- "Auto Enchant" toggle:
+--     Rerolls even if the pet already has the goal. Keeps (locks) an enchant that is
+--     already there and rolls the other slot.
+-- "Reroll (ignore current enchants)" button:
+--     Treats whatever is on the pet as worthless. The first roll has NO lock, so
+--     everything is rerolled. After each roll, the first goal enchant that lands gets
+--     locked and it keeps going for the other.
+-- Both finish by re-reading the pet and confirming it really has the goal enchants.
+
+do
+    local AutoEnchantEnabled = false
+    local AutoEnchantRunning = false
+    local EnchantDryRun = true
+    local EnchantGoal = "Both (Shiny Seeker first)"
+    local EnchantMaxTries = 30
+    local EnchantDelay = 0.3
+    local EnchantWaitTimeout = 3
+    local EnchantStaleLimit = 4      -- stop after this many rolls in a row that changed nothing
+    local EnchantLockEither = true   -- also lock Ultra Roller if it lands before Shiny Seeker
+
+    local function enchantNormalize(Value)
+        return (tostring(Value):lower():gsub("[%s_%-]+", ""))
+    end
+
+    local function enchantContains(Value, Target, Seen)
+        if type(Value) == "string" then
+            return enchantNormalize(Value):find(enchantNormalize(Target), 1, true) ~= nil
+        end
+        if type(Value) ~= "table" then return false end
+        Seen = Seen or {}
+        if Seen[Value] then return false end
+        Seen[Value] = true
+        for Key, Child in pairs(Value) do
+            if type(Key) == "string"
+                and enchantNormalize(Key):find(enchantNormalize(Target), 1, true) then
+                return true
+            end
+            if enchantContains(Child, Target, Seen) then return true end
+        end
+        return false
+    end
+
+    local function getEnchantSlot(Enchants, TargetName)
+        if type(Enchants) ~= "table" then return nil end
+        for Slot = 1, 6 do
+            if Enchants[Slot] ~= nil and enchantContains(Enchants[Slot], TargetName, {}) then
+                return Slot
+            end
+        end
+        return nil
+    end
+
+    local function getEnchantPetById(Id)
+        local Ok, Data = pcall(function() return LocalData:Get() end)
+        if not Ok or type(Data) ~= "table" or type(Data.Pets) ~= "table" then return nil end
+        for _, Pet in pairs(Data.Pets) do
+            if type(Pet) == "table" and Pet.Id == Id then return Pet end
+        end
+        return nil
+    end
+
+    local function getEnchantEquippedIds()
+        local Ok, Data = pcall(function() return LocalData:Get() end)
+        if not Ok or type(Data) ~= "table" or type(Data.Pets) ~= "table" then return {} end
+
+        local KnownIds = {}
+        for _, Pet in pairs(Data.Pets) do
+            if type(Pet) == "table" and Pet.Id ~= nil then
+                KnownIds[tostring(Pet.Id)] = Pet.Id
+            end
+        end
+
+        local Team = Data.Teams and Data.Teams[Data.TeamEquipped]
+        if type(Team) ~= "table" then
+            debugWarn("AutoEnchant", "[Auto Enchant] Equipped team data was not found.")
+            return {}
+        end
+
+        local Found, Added = {}, {}
+        local function Walk(Value, Visited)
+            if type(Value) ~= "table" or Visited[Value] then return end
+            Visited[Value] = true
+            for Key, Child in pairs(Value) do
+                local IdKey = type(Child) == "string" and Child or tostring(Child)
+                local Match = KnownIds[IdKey]
+                if Match ~= nil and (type(Child) == "string" or type(Child) == "number") then
+                    if not Added[IdKey] then
+                        Added[IdKey] = true
+                        Found[#Found + 1] = Match
+                    end
+                elseif type(Key) == "string" and KnownIds[Key] ~= nil then
+                    if not Added[Key] then
+                        Added[Key] = true
+                        Found[#Found + 1] = KnownIds[Key]
+                    end
+                elseif type(Child) == "table" then
+                    Walk(Child, Visited)
+                end
+            end
+        end
+        Walk(Team, {})
+        return Found
+    end
+
+    local function enchantSnapshot(Value, Seen)
+        if type(Value) ~= "table" then return tostring(Value) end
+        Seen = Seen or {}
+        if Seen[Value] then return "<cycle>" end
+        Seen[Value] = true
+        local Parts = {}
+        for Key, Child in pairs(Value) do
+            Parts[#Parts + 1] = tostring(Key) .. "=" .. enchantSnapshot(Child, Seen)
+        end
+        table.sort(Parts)
+        Seen[Value] = nil
+        return "{" .. table.concat(Parts, ",") .. "}"
+    end
+
+    local function waitForEnchantChange(Id, Before)
+        local Started = os.clock()
+        while os.clock() - Started < EnchantWaitTimeout do
+            local Pet = getEnchantPetById(Id)
+            if Pet and enchantSnapshot(Pet.Enchants) ~= Before then return true end
+            task.wait(0.1)
+        end
+        return false
+    end
+
+    -- Which goal enchants does this Enchants table have, and in which slots?
+    local function checkEnchantGoal(Enchants)
+        local Names = {"Shiny Seeker"}
+        if EnchantGoal ~= "Shiny Seeker Only" then
+            Names[2] = "Ultra Roller"
+        end
+
+        local Found, AllPresent = {}, true
+        for _, Name in ipairs(Names) do
+            local Slot = getEnchantSlot(Enchants, Name)
+            Found[Name] = Slot
+            if not Slot then AllPresent = false end
+        end
+        return Found, AllPresent, Names
+    end
+
+    -- Which single enchant should be locked? Shiny Seeker first.
+    local function pickEnchantLock(Found, Names)
+        for _, Name in ipairs(Names) do
+            if Found[Name] and (Name == "Shiny Seeker" or EnchantLockEither) then
+                return Name, Found[Name]
+            end
+        end
+        return nil, nil
+    end
+
+    -- Re-read the pet a moment later and confirm it really has the goal enchants
+    local function verifyEnchantGoal(Id)
+        task.wait(0.5)
+        local Pet = getEnchantPetById(Id)
+        local _, AllPresent = checkEnchantGoal(Pet and Pet.Enchants)
+
+        if AllPresent then
+            debugPrint("AutoEnchant", "[Auto Enchant] VERIFIED:", enchantSnapshot(Pet.Enchants))
+        else
+            debugWarn("AutoEnchant", "[Auto Enchant] NOT verified: the pet no longer has the goal enchants.")
+        end
+        return AllPresent
+    end
+
+    -- Returns "stop" if the whole pass should stop, otherwise nil
+    local function processEnchantPet(Id, Index, Total, Force, IgnoreCurrent)
+        local Pet = getEnchantPetById(Id)
+        if not Pet then
+            debugWarn("AutoEnchant", ("[Auto Enchant] Pet %d/%d not found; skipped."):format(Index, Total))
+            return
+        end
+
+        debugPrint("AutoEnchant", ("[Auto Enchant] Pet %d/%d: %s"):format(Index, Total, tostring(Pet.Name or Id)))
+        debugPrint("AutoEnchant", "[Auto Enchant] Starting enchants:", enchantSnapshot(Pet.Enchants))
+
+        local LockedName, LockedSlot = nil, nil
+        local StaleCount = 0
+
+        for Attempt = 1, EnchantMaxTries do
+            if not AutoEnchantEnabled then return "stop" end
+
+            Pet = getEnchantPetById(Id)
+            if not Pet then
+                debugWarn("AutoEnchant", "[Auto Enchant] Pet disappeared; stopping.")
+                return "stop"
+            end
+
+            local Found, AllPresent, Names = checkEnchantGoal(Pet.Enchants)
+            local FirstRoll = Force and Attempt == 1
+
+            -- Already has everything: done, unless this is a forced first roll
+            if AllPresent and not FirstRoll then
+                debugPrint("AutoEnchant", "[Auto Enchant] Goal reached.")
+                if not verifyEnchantGoal(Id) then return "stop" end
+                return
+            end
+
+            -- Ignore-current mode: the first roll has no lock, so nothing is protected
+            if IgnoreCurrent and FirstRoll then
+                debugPrint("AutoEnchant", "[Auto Enchant] Ignoring current enchants: first roll has no lock.")
+            elseif not LockedName then
+                local Name, Slot = pickEnchantLock(Found, Names)
+                if Name then
+                    LockedName, LockedSlot = Name, Slot
+                    debugPrint("AutoEnchant", ("[Auto Enchant] Locking %s in slot %d."):format(Name, Slot))
+                end
+            end
+
+            if EnchantDryRun then
+                debugPrint("AutoEnchant", ("[Auto Enchant] DRY RUN %d/%d: would reroll with lock slot %s"):format(
+                    Attempt, EnchantMaxTries, tostring(LockedSlot)
+                ))
+                return
+            end
+
+            local Before = enchantSnapshot(Pet.Enchants)
+
+            local Ok, Err = pcall(function()
+                RemoteEvent:FireServer("UseShadowCrystal", Id, LockedSlot)
+            end)
+            if not Ok then
+                debugWarn("AutoEnchant", "[Auto Enchant] Reroll call failed:", Err)
+                return "stop"
+            end
+
+            local Changed = waitForEnchantChange(Id, Before)
+
+            Pet = getEnchantPetById(Id)
+            if not Pet then
+                debugWarn("AutoEnchant", "[Auto Enchant] Pet data disappeared after reroll.")
+                return "stop"
+            end
+
+            debugPrint("AutoEnchant", ("[Auto Enchant] Roll %d: %s"):format(Attempt, enchantSnapshot(Pet.Enchants)))
+
+            -- Same result is a normal outcome. Only a long run of identical
+            -- results suggests the crystals ran out.
+            if Changed then
+                StaleCount = 0
+            else
+                StaleCount += 1
+                debugPrint("AutoEnchant", ("[Auto Enchant] Same result as before (%d/%d)."):format(StaleCount, EnchantStaleLimit))
+            end
+
+            local NewFound, NewAllPresent = checkEnchantGoal(Pet.Enchants)
+
+            -- The locked enchant must still be exactly where we locked it
+            if LockedName and Changed and NewFound[LockedName] ~= LockedSlot then
+                debugWarn("AutoEnchant", "[Auto Enchant] LOCK CHECK FAILED: " .. LockedName
+                    .. " is no longer in slot " .. LockedSlot .. ". Stopping.")
+                return "stop"
+            end
+
+            if NewAllPresent then
+                debugPrint("AutoEnchant", "[Auto Enchant] Goal reached for this pet.")
+                if not verifyEnchantGoal(Id) then return "stop" end
+                return
+            end
+
+            if StaleCount >= EnchantStaleLimit then
+                debugWarn("AutoEnchant", "[Auto Enchant] Too many identical results in a row (out of crystals?). Stopping.")
+                return "stop"
+            end
+
+            task.wait(EnchantDelay)
+        end
+
+        debugWarn("AutoEnchant", "[Auto Enchant] Maximum rerolls reached for pet", tostring(Id))
+    end
+
+    local function runEnchantPass(Force, IgnoreCurrent)
+        if AutoEnchantRunning then return end
+        AutoEnchantRunning = true
+        task.spawn(function()
+            local Ok, Err = pcall(function()
+                local Ids = getEnchantEquippedIds()
+                if #Ids == 0 then
+                    debugWarn("AutoEnchant", "[Auto Enchant] No equipped pets found; check the LocalData team structure.")
+                    return
+                end
+                debugPrint("AutoEnchant", ("[Auto Enchant] Starting pass over %d equipped pet(s)."):format(#Ids))
+                for Index, Id in ipairs(Ids) do
+                    if not AutoEnchantEnabled then break end
+                    if processEnchantPet(Id, Index, #Ids, Force, IgnoreCurrent) == "stop" then
+                        break
+                    end
+                    task.wait(0.1)
+                end
+                debugPrint("AutoEnchant", "[Auto Enchant] Pass finished.")
+            end)
+            if not Ok then debugWarn("AutoEnchant", "[Auto Enchant] Error:", Err) end
+            AutoEnchantRunning = false
+        end)
+    end
+
+    EnchantBox:AddDropdown(
+        "Enchant goal",
+        {"Both (Shiny Seeker first)", "Shiny Seeker only"},
+        "Both (Shiny Seeker first)",
+        function(Value) EnchantGoal = Value end
+    )
+
+    EnchantBox:AddSlider("Max rerolls per pet", 1, 100, EnchantMaxTries, function(Value)
+        EnchantMaxTries = Value
+    end)
+
+    EnchantBox:AddSlider("Delay (x0.1s)", 1, 50, 3, function(Value)
+        EnchantDelay = Value / 10
+    end)
+
+    addToggle(EnchantBox, "Lock Ultra Roller if it lands first", true, function(Value)
+        EnchantLockEither = Value
+    end)
+
+    addToggle(EnchantBox, "Dry run (no rerolls)", true, function(Value)
+        EnchantDryRun = Value
+    end)
+
+    addToggle(EnchantBox, "Auto Enchant", false, function(Value)
+        AutoEnchantEnabled = Value
+        if Value then runEnchantPass(true, false) end
+    end)
+
+    EnchantBox:AddButton("Reroll (ignore current enchants)", function()
+        if AutoEnchantRunning then
+            debugWarn("AutoEnchant", "[Auto Enchant] A pass is already running.")
+            return
+        end
+        local WasEnabled = AutoEnchantEnabled
+        AutoEnchantEnabled = true
+        runEnchantPass(true, true)
+        task.spawn(function()
+            while AutoEnchantRunning do task.wait(0.1) end
+            if not WasEnabled then AutoEnchantEnabled = false end
+        end)
+    end)
+
+    onCleanup(function()
+        AutoEnchantEnabled = false
+    end)
+end
+
+----------------------------------------------------------
+-- 5.8 STATUS UPDATES + CLOSE ALERT
+----------------------------------------------------------
+
+do
+    local StatusEnabled = false
+    local StatusSession = 0
+    local StatusInterval = 5 -- minutes
+    local StatusStart = os.time()
+    local LastHatches = 0
+    local ClosedSent = false
+    local StatusConnections = {}
+
+    local function formatUptime(Seconds)
+        return string.format("%dh %02dm %02ds",
+            math.floor(Seconds / 3600),
+            math.floor(Seconds % 3600 / 60),
+            Seconds % 60
+        )
+    end
+
+    local function getHatches()
+        local Success, Data = pcall(function()
+            return LocalData:Get()
+        end)
+
+        return (Success and Data and Data.Stats and Data.Stats.Hatches) or 0
+    end
+
+    local function sendStatus(Title, Description, Color, Ping)
+        if not isValidURL(Config.StatusWebhook) then
+            debugWarn("StatusUpdates", "No valid status webhook URL set")
+            return false
+        end
+
+        local RoleId = Config.StatusRoleId
+        local ShouldPing = Ping and RoleId ~= ""
+
+        local Payload = {
+            content = ShouldPing and ("<@&" .. RoleId .. ">") or "",
+            embeds = {{
+                title = Title,
+                description = Description,
+                color = Color,
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+            }}
+        }
+
+        if ShouldPing then
+            Payload.allowed_mentions = {roles = {RoleId}}
+        end
+
+        return sendWebhook(Config.StatusWebhook, Payload)
+    end
+
+    local function sendClosed(Reason)
+        if not StatusEnabled or ClosedSent then
+            return
+        end
+
+        ClosedSent = true
+
+        sendStatus(
+            "Game closed / disconnected",
+            "Player: **" .. LocalPlayer.Name .. "**"
+                .. "\nReason: " .. tostring(Reason)
+                .. "\nUptime: **" .. formatUptime(os.time() - StatusStart) .. "**"
+                .. "\nTotal Hatches: **" .. FormatCommas(getHatches()) .. "**",
+            0xFF0000,
+            true
+        )
+    end
+
+    local function disconnectStatus()
+        for _, Connection in ipairs(StatusConnections) do
+            pcall(function()
+                Connection:Disconnect()
+            end)
+        end
+
+        table.clear(StatusConnections)
+    end
+
+    local function startStatus()
+        StatusSession += 1
+        local Session = StatusSession
+
+        StatusStart = os.time()
+        LastHatches = getHatches()
+        ClosedSent = false
+
+        -- Close / disconnect detection
+        table.insert(StatusConnections,
+            game:GetService("GuiService").ErrorMessageChanged:Connect(function(Message)
+                if Message and Message ~= "" then
+                    sendClosed("Error message: " .. Message)
+                end
+            end)
+        )
+
+        pcall(function()
+            table.insert(StatusConnections,
+                game:GetService("NetworkClient").ChildRemoved:Connect(function()
+                    sendClosed("Lost connection to the server")
+                end)
+            )
+        end)
+
+        table.insert(StatusConnections,
+            Players.PlayerRemoving:Connect(function(Player)
+                if Player == LocalPlayer then
+                    sendClosed("Player left the game")
+                end
+            end)
+        )
+
+        -- Periodic updates
+        task.spawn(function()
+            sendStatus(
+                "Status monitoring started",
+                "Player: **" .. LocalPlayer.Name .. "**\nUpdates every **" .. StatusInterval .. "** min.",
+                0x00FF00,
+                false
+            )
+
+            while StatusEnabled and Session == StatusSession do
+                local Interval = StatusInterval * 60
+                local Waited = 0
+
+                -- wait in 1s steps so toggling off / changing interval reacts quickly
+                while Waited < Interval and StatusEnabled and Session == StatusSession do
+                    task.wait(1)
+                    Waited += 1
+                end
+
+                if not StatusEnabled or Session ~= StatusSession then
+                    break
+                end
+
+                local Hatches = getHatches()
+
+                sendStatus(
+                    "Status update",
+                    "Player: **" .. LocalPlayer.Name .. "**"
+                        .. "\nUptime: **" .. formatUptime(os.time() - StatusStart) .. "**"
+                        .. "\nTotal Hatches: **" .. FormatCommas(Hatches) .. "**"
+                        .. "\nHatches since last update: **" .. FormatCommas(Hatches - LastHatches) .. "**"
+                        .. "\nNext update: <t:" .. (os.time() + StatusInterval * 60) .. ":R>",
+                    0x3498DB,
+                    false
+                )
+
+                LastHatches = Hatches
+            end
+        end)
+    end
+
+    WebhookBox:AddSlider("Update interval (min)", 1, 60, StatusInterval, function(Value)
+        StatusInterval = Value
+    end)
+
+    addToggle(WebhookBox, "Status updates + close alert", false, function(Value)
+        StatusEnabled = Value
+
+        if Value then
+            startStatus()
+        else
+            StatusSession += 1
+            disconnectStatus()
+        end
+    end)
+
+    onCleanup(function()
+        StatusEnabled = false
+        StatusSession += 1
+        disconnectStatus()
+    end)
+end
+
+----------------------------------------------------------
+-- LIVE STATS TAB
+----------------------------------------------------------
+
+do
+    local PlayerLabels = {}
+    local SessionLabels = {}
+    local AbbreviateCurrencies = true
+
+    ----------------------------------------------------------
+    -- RAREST PET TRACKING
+    ----------------------------------------------------------
+
+    local RarestPetRank = -1
+    local RarestPetName = nil
+    local RarestPetRarity = nil
+    local RarestPetChance = nil
+    local RarestPetAsset = nil
+    local RarestPetVariant = ""
+    local RarestPetConnection = nil
+    local RarestPetImageRequest = 0
+
+    local RarestPetExist = nil
+    local LastHatchData = nil
+
+    ----------------------------------------------------------
+    -- NUMBER ABBREVIATION
+    ----------------------------------------------------------
+
+    local NumberUnits = {
+        {1e30, "No"},
+        {1e27, "Oc"},
+        {1e24, "Sp"},
+        {1e21, "Sx"},
+        {1e18, "QI"},
+        {1e15, "QA"},
+        {1e12, "T"},
+        {1e9, "B"},
+        {1e6, "M"},
+        {1e3, "K"},
+    }
+
+    local function abbreviateNumber(Number)
+        Number = tonumber(Number)
+
+        if not Number then
+            return tostring(Number)
+        end
+
+        local Negative = Number < 0
+        Number = math.abs(Number)
+
+        for _, Unit in ipairs(NumberUnits) do
+            if Number >= Unit[1] then
+                local Value = Number / Unit[1]
+                local Formatted
+
+                if Value >= 100 then
+                    Formatted = string.format("%.0f", Value)
+                elseif Value >= 10 then
+                    Formatted = string.format("%.1f", Value)
+                else
+                    Formatted = string.format("%.2f", Value)
+                end
+
+                Formatted = Formatted:gsub("%.?0+$", "")
+
+                return (Negative and "-" or "")
+                    .. Formatted .. Unit[2]
+            end
+        end
+
+        return (Negative and "-" or "")
+            .. tostring(math.floor(Number))
+    end
+
+    local function formatStatValue(Name, Value)
+        local LowerName = string.lower(tostring(Name))
+        local NumericValue = tonumber(Value)
+
+        local IsEggOrBubble =
+            LowerName:find("egg", 1, true) ~= nil
+            or LowerName:find("bubble", 1, true) ~= nil
+            or LowerName:find("hatch", 1, true) ~= nil
+
+        if NumericValue then
+            if AbbreviateCurrencies and IsEggOrBubble then
+                return abbreviateNumber(NumericValue)
+            end
+
+            return FormatCommas(NumericValue)
+        end
+
+        return tostring(Value)
+    end
+
+    ----------------------------------------------------------
+    -- READOUT HELPERS
+    ----------------------------------------------------------
+
+    local function addReadout(Box, Text)
+        local Ok, Label = pcall(function()
+            return Box:AddLabel(Text .. ": loading...")
+        end)
+
+        if Ok and Label then
+            return Label
+        end
+
+        local FallbackOk, Fallback = pcall(function()
+            return Box:AddButton(
+                Text .. ": loading...",
+                function() end
+            )
+        end)
+
+        if FallbackOk then
+            return Fallback
+        end
+
+        return nil
+    end
+
+    local function setReadout(Label, Text)
+        if not Label then
+            return
+        end
+
+        pcall(function()
+            if type(Label.Set) == "function" then
+                Label:Set(Text)
+            elseif type(Label.SetText) == "function" then
+                Label:SetText(Text)
+            elseif type(Label.setText) == "function" then
+                Label:setText(Text)
+            elseif Label.TextLabel then
+                Label.TextLabel.Text = Text
+            elseif Label.Label then
+                Label.Label.Text = Text
+            end
+        end)
+    end
+
+    local function formatDuration(Seconds)
+        Seconds = math.max(0, math.floor(Seconds))
+
+        return string.format(
+            "%02d:%02d:%02d",
+            math.floor(Seconds / 3600),
+            math.floor(Seconds % 3600 / 60),
+            Seconds % 60
+        )
+    end
+
+    ----------------------------------------------------------
+    -- RARITY ABBREVIATION
+    ----------------------------------------------------------
+
+    local RarityAbbreviations = {
+        ["Common"] = "Com.",
+        ["Uncommon"] = "Uncom.",
+        ["Rare"] = "Rare",
+        ["Very Rare"] = "V.Rare",
+        ["Epic"] = "Epic",
+        ["Legendary"] = "Leg.",
+        ["Mythical"] = "Myth.",
+        ["Mythic"] = "Myth.",
+        ["Exotic"] = "Exot.",
+        ["Unique"] = "Uniq.",
+        ["Secret"] = "Sec.",
+        ["Divine"] = "Div.",
+        ["Celestial"] = "Celest.",
+        ["Transcendent"] = "Trans.",
+        ["Infinity"] = "Inf.",
+        ["Exclusive"] = "Excl.",
+    }
+
+    local function abbreviateRarity(Rarity)
+        if Rarity == nil then
+            return "--"
+        end
+
+        local Text = tostring(Rarity)
+
+        if RarityAbbreviations[Text] then
+            return RarityAbbreviations[Text]
+        end
+
+        -- Handle longer rarity names not listed above.
+        if #Text > 10 then
+            return string.sub(Text, 1, 8) .. "."
+        end
+
+        return Text
+    end
+
+    ----------------------------------------------------------
+    -- ODDS HELPERS
+    ----------------------------------------------------------
+
+    local function formatOddsDenominator(Number)
+        Number = tonumber(Number)
+
+        if not Number or Number <= 0 then
+            return nil
+        end
+
+        return FormatSuffix(math.ceil(Number))
+    end
+
+    local function getOddsDenominator(Chance, Depth)
+        Depth = Depth or 0
+
+        if Chance == nil or Depth > 3 then
+            return nil
+        end
+
+        if type(Chance) == "table" then
+            local PossibleKeys = {
+                "Odds",
+                "Chance",
+                "Denominator",
+                "Value",
+                "OneIn",
+                "OneInChance",
+            }
+
+            for _, Key in ipairs(PossibleKeys) do
+                if Chance[Key] ~= nil then
+                    local Result = getOddsDenominator(
+                        Chance[Key],
+                        Depth + 1
+                    )
+
+                    if Result then
+                        return Result
+                    end
+                end
+            end
+
+            return nil
+        end
+
+        local ChanceText = tostring(Chance)
+
+        local FractionDenominator =
+            ChanceText:match("^%s*1%s*/%s*([%d%.]+)%s*$")
+
+        if FractionDenominator then
+            return formatOddsDenominator(FractionDenominator)
+        end
+
+        local OneInDenominator =
+            string.lower(ChanceText):match("1%s*in%s*([%d%.]+)")
+
+        if OneInDenominator then
+            return formatOddsDenominator(OneInDenominator)
+        end
+
+        local Percentage =
+            ChanceText:match("^%s*([%d%.]+)%s*%%%s*$")
+
+        if Percentage then
+            local PercentageNumber = tonumber(Percentage)
+
+            if PercentageNumber and PercentageNumber > 0 then
+                return formatOddsDenominator(
+                    100 / PercentageNumber
+                )
+            end
+
+            return nil
+        end
+
+        local NumericChance = tonumber(Chance)
+
+        if not NumericChance or NumericChance <= 0 then
+            return nil
+        end
+
+        -- Assumes a numeric result is a percentage, matching
+        -- the original code's calculation.
+        return formatOddsDenominator(100 / NumericChance)
+    end
+
+    local function getComparableChance(Chance)
+        if type(Chance) == "table" then
+            local PossibleKeys = {
+                "Odds",
+                "Chance",
+                "Denominator",
+                "Value",
+                "OneIn",
+                "OneInChance",
+            }
+
+            for _, Key in ipairs(PossibleKeys) do
+                if Chance[Key] ~= nil then
+                    local Result = getComparableChance(Chance[Key])
+
+                    if Result then
+                        return Result
+                    end
+                end
+            end
+
+            return nil
+        end
+
+        local Text = tostring(Chance or "")
+
+        local Fraction =
+            Text:match("^%s*1%s*/%s*([%d%.]+)%s*$")
+
+        if Fraction then
+            return tonumber(Fraction)
+        end
+
+        local OneIn =
+            string.lower(Text):match("1%s*in%s*([%d%.]+)")
+
+        if OneIn then
+            return tonumber(OneIn)
+        end
+
+        local Percentage =
+            Text:match("^%s*([%d%.]+)%s*%%%s*$")
+
+        if Percentage then
+            local Value = tonumber(Percentage)
+
+            if Value and Value > 0 then
+                return 100 / Value
+            end
+
+            return nil
+        end
+
+        local Numeric = tonumber(Chance)
+
+        if Numeric and Numeric > 0 then
+            return 100 / Numeric
+        end
+
+        return nil
+    end
+
+    ----------------------------------------------------------
+    -- IMAGE SOURCE RESOLVER
+    ----------------------------------------------------------
+
+    local function resolvePetImage(ImageValue, Depth)
+        Depth = Depth or 0
+
+        if ImageValue == nil or Depth > 4 then
+            return nil
+        end
+
+        local ValueType = typeof(ImageValue)
+
+        if ValueType == "table" then
+            local PossibleKeys = {
+                "Image",
+                "ImageId",
+                "ImageID",
+                "AssetId",
+                "AssetID",
+                "Id",
+                "ID",
+                "id",
+                "Normal",
+                "Thumbnail",
+                "Icon",
+                "IconImage",
+            }
+
+            for _, Key in ipairs(PossibleKeys) do
+                local ChildValue = ImageValue[Key]
+
+                if ChildValue ~= nil then
+                    local Result = resolvePetImage(
+                        ChildValue,
+                        Depth + 1
+                    )
+
+                    if Result then
+                        return Result
+                    end
+                end
+            end
+
+            return nil
+        end
+
+        if ValueType ~= "string" and ValueType ~= "number" then
+            return nil
+        end
+
+        local TextValue = tostring(ImageValue)
+
+        if TextValue == "" then
+            return nil
+        end
+
+        if TextValue:match("^rbxassetid://")
+            or TextValue:match("^rbxthumb://")
+            or TextValue:match("^https?://") then
+            return TextValue
+        end
+
+        local NumericID = tonumber(TextValue)
+
+        if NumericID then
+            local ThumbnailOK, Thumbnail = pcall(
+                getThumbnail,
+                NumericID
+            )
+
+            if ThumbnailOK
+                and Thumbnail ~= nil
+                and tostring(Thumbnail) ~= "" then
+
+                local ThumbnailText = tostring(Thumbnail)
+
+                if tonumber(ThumbnailText) then
+                    return "rbxassetid://" .. ThumbnailText
+                end
+
+                return ThumbnailText
+            end
+
+            return "rbxassetid://" .. tostring(
+                math.floor(NumericID)
+            )
+        end
+
+        local ThumbnailOK, Thumbnail = pcall(
+            getThumbnail,
+            ImageValue
+        )
+
+        if ThumbnailOK
+            and Thumbnail ~= nil
+            and tostring(Thumbnail) ~= "" then
+            return tostring(Thumbnail)
+        end
+
+        return nil
+    end
+
+    ----------------------------------------------------------
+    -- RAREST PET BOX
+    ----------------------------------------------------------
+
+    local IMAGE_SIZE = 180
+
+    local RarestPetBox = StatsLeft:AddBox("Rarest Pet Hatched")
+
+    local RarestPetRow = Instance.new("Frame")
+    RarestPetRow.Name = "RarestPetDisplay"
+    RarestPetRow.Size = UDim2.new(1, 0, 0, 0)
+    RarestPetRow.AutomaticSize = Enum.AutomaticSize.Y
+    RarestPetRow.BackgroundTransparency = 1
+    RarestPetRow.BorderSizePixel = 0
+    RarestPetRow.ClipsDescendants = false
+    RarestPetRow.Parent = RarestPetBox.Frame
+
+    local RowLayout = Instance.new("UIListLayout")
+    RowLayout.FillDirection = Enum.FillDirection.Vertical
+    RowLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    RowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    RowLayout.Padding = UDim.new(0, 6)
+    RowLayout.Parent = RarestPetRow
+
+    local RowPadding = Instance.new("UIPadding")
+    RowPadding.PaddingTop = UDim.new(0, 8)
+    RowPadding.PaddingBottom = UDim.new(0, 10)
+    RowPadding.PaddingLeft = UDim.new(0, 8)
+    RowPadding.PaddingRight = UDim.new(0, 8)
+    RowPadding.Parent = RarestPetRow
+
+    local RarestPetImageLabel = Instance.new("ImageLabel")
+    RarestPetImageLabel.Name = "PetImage"
+    RarestPetImageLabel.LayoutOrder = 1
+    RarestPetImageLabel.Size = UDim2.fromOffset(IMAGE_SIZE, IMAGE_SIZE)
+    RarestPetImageLabel.BackgroundTransparency = 1
+    RarestPetImageLabel.BorderSizePixel = 0
+    RarestPetImageLabel.ScaleType = Enum.ScaleType.Fit
+    RarestPetImageLabel.Image = ""
+    RarestPetImageLabel.Parent = RarestPetRow
+
+    -- Make sure the box (and any wrapper frames) grow with the content.
+    do
+        local Current = RarestPetBox.Frame
+        for _ = 1, 3 do
+            if Current and Current:IsA("GuiObject") and not Current:IsA("ScrollingFrame") then
+                pcall(function()
+                    Current.AutomaticSize = Enum.AutomaticSize.Y
+                    Current.ClipsDescendants = false
+                end)
+                Current = Current.Parent
+            else
+                break
+            end
+        end
+    end
+
+    local function createPetInfoLabel(Name, Order, Text, Font, TextSize)
+        local Label = Instance.new("TextLabel")
+        Label.Name = Name
+        Label.LayoutOrder = Order
+        Label.Size = UDim2.new(1, 0, 0, 0)
+        Label.AutomaticSize = Enum.AutomaticSize.Y
+        Label.BackgroundTransparency = 1
+        Label.Font = Font or Enum.Font.Gotham
+        Label.TextSize = TextSize or 15
+        Label.TextColor3 = Color3.fromRGB(235, 235, 235)
+        Label.TextXAlignment = Enum.TextXAlignment.Center
+        Label.TextYAlignment = Enum.TextYAlignment.Top
+        Label.TextWrapped = true
+        Label.TextTruncate = Enum.TextTruncate.None
+        Label.Text = Text
+        Label.Parent = RarestPetRow
+        return Label
+    end
+
+    local RarestPetNameText = createPetInfoLabel("PetName", 2, "No pet recorded yet", Enum.Font.GothamBold, 18)
+    local RarestPetRarityText = createPetInfoLabel("PetRarity", 3, "Rarity: --")
+    local RarestPetOddsText = createPetInfoLabel("PetOdds", 4, "Odds: --")
+    local RarestPetExistText = createPetInfoLabel("PetExist", 5, "Exist count: --")
+
+    ----------------------------------------------------------
+    -- RAREST PET DISPLAY UPDATER
+    ----------------------------------------------------------
+
+    local function removeLeadingVariant(Name, Variant)
+        if not Name or not Variant then
+            return Name
+        end
+
+        local EscapedVariant = Variant:gsub(
+            "([^%w])",
+            "%%%1"
+        )
+
+        return Name:gsub(
+            "^%s*" .. EscapedVariant .. "%s+",
+            "",
+            1
+        )
+    end
+
+    local function cleanPetName(Name)
+        Name = tostring(Name or "")
+
+        -- Strip leading variant words so they aren't duplicated.
+        -- Repeat because names can contain several prefixes.
+        for _ = 1, 4 do
+            local Before = Name
+
+            Name = removeLeadingVariant(Name, "Super")
+            Name = removeLeadingVariant(Name, "Mythic")
+            Name = removeLeadingVariant(Name, "Shiny")
+
+            if Name == Before then
+                break
+            end
+        end
+
+        return Name
+    end
+
+    local function findExistCount(Value, Depth)
+        Depth = Depth or 0
+
+        if type(Value) ~= "table" or Depth > 3 then
+            return nil
+        end
+
+        for Key, Child in pairs(Value) do
+            if type(Key) == "string"
+                and Key:lower():find("exist", 1, true)
+                and tonumber(Child) then
+                return tonumber(Child)
+            end
+        end
+
+        for _, Child in pairs(Value) do
+            if type(Child) == "table" then
+                local Result = findExistCount(Child, Depth + 1)
+                if Result then
+                    return Result
+                end
+            end
+        end
+
+        return nil
+    end
+
+    local function dumpTable(Value, Indent, Depth)
+        Indent = Indent or ""
+        Depth = Depth or 0
+        if Depth > 4 then return end
+
+        for Key, Child in pairs(Value) do
+            print(Indent .. tostring(Key) .. " = " .. tostring(Child) .. " (" .. typeof(Child) .. ")")
+            if type(Child) == "table" then
+                dumpTable(Child, Indent .. "  ", Depth + 1)
+            end
+        end
+    end
+
+    RarestPetBox:AddButton("Dump last hatch data", function()
+        runDebugButton(function()
+            if LastHatchData then
+                dumpTable(LastHatchData)
+            else
+                print("No hatch recorded yet")
+            end
+        end)
+    end)
+
+    local function refreshRarestPetSection()
+        local DisplayName = "No pet recorded yet"
+
+        if RarestPetName then
+            DisplayName = cleanPetName(RarestPetName)
+
+            if RarestPetVariant ~= "" then
+                DisplayName = RarestPetVariant .. " " .. DisplayName
+            end
+        end
+
+        RarestPetNameText.Text = DisplayName
+
+        -- Abbreviate the rarity, and truncate as a second safeguard.
+        RarestPetRarityText.Text =
+            "Rarity: " .. abbreviateRarity(RarestPetRarity)
+
+        RarestPetExistText.Text = RarestPetExist
+            and ("Exist count: " .. FormatCommas(RarestPetExist))
+            or "Exist count: unavailable"
+
+        local OddsDenominator =
+            getOddsDenominator(RarestPetChance)
+
+        if OddsDenominator then
+            RarestPetOddsText.Text =
+                "Odds: 1/" .. OddsDenominator
+        else
+            RarestPetOddsText.Text = "Odds: unavailable"
+        end
+
+        -- Resolve images independently of text updates.
+        RarestPetImageRequest += 1
+
+        local ThisRequest = RarestPetImageRequest
+        local PetAsset = RarestPetAsset
+        local PetName = RarestPetName
+
+        task.spawn(function()
+            local Ok, ImageSource = pcall(function()
+                return resolvePetImage(PetAsset)
+            end)
+
+            if ThisRequest ~= RarestPetImageRequest then
+                return
+            end
+
+            if Ok
+                and ImageSource
+                and tostring(ImageSource) ~= "" then
+
+                RarestPetImageLabel.Image = tostring(ImageSource)
+                RarestPetImageLabel.Visible = true
+
+                print(
+                    "[LegendUI] Rarest pet image assigned:",
+                    tostring(PetName),
+                    tostring(ImageSource)
+                )
+            else
+                warn(
+                    "[LegendUI] Could not resolve image for:",
+                    tostring(PetName),
+                    "Asset:",
+                    tostring(PetAsset)
+                )
+            end
+        end)
+    end
+
+    ----------------------------------------------------------
+    -- PROCESS HATCHED PET
+    ----------------------------------------------------------
+
+    local function updateRarestPet(PetInfo, PetData)
+        if type(PetInfo) ~= "table" or not PetInfo.Name then
+            return
+        end
+
+        local Success, Name, Rarity, Chance = pcall(function()
+            return
+                ItemUtil:GetName(PetInfo),
+                ItemUtil:GetRarity(PetInfo),
+                PetUtil:GetChance(PetInfo)
+        end)
+
+        if not Success or not Name or not Rarity then
+            warn(
+                "[LegendUI] Failed to read hatched pet:",
+                tostring(PetInfo.Name),
+                tostring(Name)
+            )
+            return
+        end
+
+        local RankSuccess, Rank = pcall(function()
+            return rarityLevel(Rarity)
+        end)
+
+        Rank = RankSuccess and tonumber(Rank) or 0
+
+        if PetInfo.Super and Rank == 1 then
+            Rank = 2
+        end
+
+        local NumericChance = getComparableChance(Chance)
+        local IsRarer = Rank > RarestPetRank
+
+        if Rank == RarestPetRank and NumericChance then
+            local PreviousChance =
+                getComparableChance(RarestPetChance)
+
+            if not PreviousChance
+                or NumericChance > PreviousChance then
+                IsRarer = true
+            end
+        end
+
+        if not RarestPetName then
+            IsRarer = true
+        end
+
+        if not IsRarer then
+            return
+        end
+
+        RarestPetRank = Rank
+        RarestPetName = tostring(Name)
+        RarestPetRarity = tostring(Rarity)
+        RarestPetChance = Chance
+        RarestPetAsset = nil
+        RarestPetExist = findExistCount(PetData) or findExistCount(PetInfo)
+
+        local Variants = {}
+
+        if PetInfo.Super then
+            table.insert(Variants, "Super")
+        end
+
+        if PetInfo.Mythic then
+            table.insert(Variants, "Mythic")
+        end
+
+        if PetInfo.Shiny then
+            table.insert(Variants, "Shiny")
+        end
+
+        RarestPetVariant = table.concat(Variants, " ")
+
+        ------------------------------------------------------
+        -- SELECT PET IMAGE
+        ------------------------------------------------------
+
+        local PetDefinition = Pets[PetInfo.Name]
+
+        if PetDefinition and PetDefinition.Images then
+            local Images = PetDefinition.Images
+            local Image
+
+            if PetInfo.Mythic and PetInfo.Shiny then
+                Image = Images.MythicShiny
+            elseif PetInfo.Mythic then
+                Image = Images.Mythic
+            elseif PetInfo.Shiny then
+                Image = Images.Shiny
+            end
+
+            Image = Image
+                or Images.Normal
+                or Images.Shiny
+                or Images.Mythic
+                or Images.MythicShiny
+
+            RarestPetAsset = Image
+        else
+            warn(
+                "[LegendUI] Pet image definition not found:",
+                tostring(PetInfo.Name)
+            )
+        end
+
+        print(
+            "[LegendUI] Rarest pet updated:",
+            RarestPetName,
+            "Rarity:",
+            RarestPetRarity,
+            "Chance:",
+            tostring(Chance),
+            "Chance type:",
+            typeof(Chance)
+        )
+
+        refreshRarestPetSection()
+    end
+
+    ----------------------------------------------------------
+    -- HATCH EVENT LISTENER
+    ----------------------------------------------------------
+
+    local ListenerSuccess, Listener = pcall(function()
+        return RemoteModule.Event("HatchEgg"):Connect(
+            function(Data)
+                if type(Data) ~= "table"
+                    or type(Data.Pets) ~= "table" then
+                    return
+                end
+
+                LastHatchData = Data
+
+                for _, PetData in pairs(Data.Pets) do
+                    if type(PetData) == "table" then
+                        if type(PetData.Pet) == "table" then
+                            updateRarestPet(PetData.Pet, PetData)
+                        elseif PetData.Name then
+                            updateRarestPet(PetData, PetData)
+                        end
+                    end
+                end
+            end
+        )
+    end)
+
+    if ListenerSuccess then
+        RarestPetConnection = Listener
+    else
+        warn(
+            "[LegendUI] Rarest pet listener failed:",
+            tostring(Listener)
+        )
+    end
+
+    ----------------------------------------------------------
+    -- PLAYER LEADERSTATS
+    ----------------------------------------------------------
+
+    local function refreshPlayerStats()
+        local Leaderstats =
+            LocalPlayer:FindFirstChild("leaderstats")
+
+        local Seen = {}
+
+        if Leaderstats then
+            for _, Stat in ipairs(Leaderstats:GetChildren()) do
+                if Stat:IsA("IntValue")
+                    or Stat:IsA("NumberValue")
+                    or Stat:IsA("StringValue") then
+
+                    Seen[Stat.Name] = true
+
+                    local Label = PlayerLabels[Stat.Name]
+
+                    if not Label then
+                        Label = addReadout(
+                            PlayerStatsBox,
+                            Stat.Name
+                        )
+
+                        PlayerLabels[Stat.Name] = Label
+                    end
+
+                    setReadout(
+                        Label,
+                        Stat.Name .. ": "
+                            .. formatStatValue(
+                                Stat.Name,
+                                Stat.Value
+                            )
+                    )
+                end
+            end
+        end
+
+        for Name, Label in pairs(PlayerLabels) do
+            if not Seen[Name] then
+                setReadout(
+                    Label,
+                    Name .. ": (unavailable)"
+                )
+            end
+        end
+    end
+
+    ----------------------------------------------------------
+    -- SESSION STATISTICS
+    ----------------------------------------------------------
+
+    local SessionReadouts = {
+        {
+            "Script session uptime",
+            function()
+                return formatDuration(
+                    os.clock()
+                        - (
+                            Env.HatchStatsSessionStartedAt
+                            or os.clock()
+                        )
+                )
+            end
+        },
+        {
+            "Server elapsed time",
+            function()
+                return formatDuration(
+                    workspace.DistributedGameTime
+                )
+            end
+        },
+        {
+            "Pets hatched since execution",
+            function()
+                return tostring(
+                    Env.HatchStatsPetsHatched or 0
+                )
+            end
+        },
+        {
+            "Successful hatch webhook posts",
+            function()
+                return tostring(
+                    Env.HatchStatsWebhookPosts or 0
+                )
+            end
+        },
+        {
+            "Webhook notifications enabled",
+            function()
+                return tostring(
+                    Env.HatchWebhookEnabled or false
+                )
+            end
+        },
+    }
+
+    for Index, Entry in ipairs(SessionReadouts) do
+        SessionLabels[Index] = addReadout(
+            SessionStatsBox,
+            Entry[1]
+        )
+    end
+
+    ----------------------------------------------------------
+    -- LIVE UPDATE LOOP
+    ----------------------------------------------------------
+
+    task.spawn(function()
+        while true do
+            refreshPlayerStats()
+
+            for Index, Entry in ipairs(SessionReadouts) do
+                local Ok, Value = pcall(Entry[2])
+
+                if Ok then
+                    setReadout(
+                        SessionLabels[Index],
+                        Entry[1] .. ": " .. tostring(Value)
+                    )
+                else
+                    setReadout(
+                        SessionLabels[Index],
+                        Entry[1] .. ": unavailable"
+                    )
+                end
+            end
+
+            task.wait(1)
+        end
+    end)
+
+    ----------------------------------------------------------
+    -- ABBREVIATION TOGGLE
+    ----------------------------------------------------------
+
+    addToggle(
+        PlayerStatsBox,
+        "Abbreviate Eggs & Bubbles",
+        true,
+        function(Value)
+            AbbreviateCurrencies = Value
+            refreshPlayerStats()
+        end
+    )
+
+    ----------------------------------------------------------
+    -- CLEANUP
+    ----------------------------------------------------------
+
+    onCleanup(function()
+        if RarestPetConnection then
+            pcall(function()
+                RarestPetConnection:Disconnect()
+            end)
+
+            RarestPetConnection = nil
+        end
+
+        RarestPetImageRequest += 1
+
+        if RarestPetRow then
+            pcall(function()
+                RarestPetRow:Destroy()
+            end)
+
+            RarestPetRow = nil
+        end
+    end)
+end
+
+----------------------------------------------------------
+-- 5.9 MISC
+----------------------------------------------------------
+
+do
+    addToggle(MiscBox, "Show open/close button", false, function(Value)
+        Window:SetToggleButtonVisible(Value)
+    end)
+
+    MiscBox:AddCheckbox("Example option", false)
+
+    MiscBox:AddDropdown("Mode", {"Legit", "Rage", "Safe"}, "Legit", function(Value)
+        debugPrint("Misc", "Mode selected:", Value)
+    end)
+
+    MiscBox:AddButton("Print Something", function()
+        runDebugButton(function()
+            print("Hello from LegendUI!")
+        end)
+    end)
+end
+
+----------------------------------------------------------
+-- 5.4c RIFT TELEPORT
+----------------------------------------------------------
+-- Rifts live in workspace.Rendered.Rifts. Each rift has a child called
+-- "Display" (plus Decoration / Gift / Sign / Output); we teleport to Display.
+
+do
+    local RiftBox = FarmLeft:AddBox("Rift Teleport")
+
+    local CHECK_RATE = 0.25
+    local OPEN_DELAY = 0.1
+    local HATCH_AMOUNT = 12
+    local SelectedEgg = ""
+
+    local DetectorEnabled = false
+    local DetectorSession = 0
+    local DetectorConnections = {}
+    local CurrentEgg = nil
+
+    local HatchEnabled = false
+    local HatchSession = 0
+
+    local function getEggFolder()
+        local Rendered = workspace:FindFirstChild("Rendered")
+        return Rendered and Rendered:FindFirstChild("Generic")
+    end
+
+    local function findClosestEgg()
+        local Folder = getEggFolder()
+        local Root = getRoot()
+
+        if not Folder or not Root then
+            return nil
+        end
+
+        local Closest, ClosestDist = nil, math.huge
+
+        for _, Child in ipairs(Folder:GetChildren()) do
+            if Child.Name:find("Egg", 1, true) then
+                local Ok, Pivot = pcall(function()
+                    return Child:GetPivot()
+                end)
+
+                if Ok then
+                    local Dist = (Pivot.Position - Root.Position).Magnitude
+
+                    if Dist < ClosestDist then
+                        Closest, ClosestDist = Child, Dist
+                    end
+                end
+            end
+        end
+
+        return Closest, ClosestDist
+    end
+
+    local function onNewClosest(Egg, Dist)
+        if Egg then
+            SelectedEgg = Egg.Name
+            debugPrint("Eggs", ("New closest egg: %s (%.1f studs)"):format(Egg.Name, Dist))
+        else
+            debugPrint("Eggs", "No eggs nearby")
+        end
+    end
+
+    local function checkClosest()
+        local Egg, Dist = findClosestEgg()
+
+        if Egg ~= CurrentEgg then
+            CurrentEgg = Egg
+            onNewClosest(Egg, Dist)
+        end
+    end
+
+    local function disconnectDetector()
+        for _, Connection in ipairs(DetectorConnections) do
+            Connection:Disconnect()
+        end
+
+        table.clear(DetectorConnections)
+        CurrentEgg = nil
+    end
+
+    local function startDetector()
+        disconnectDetector()
+
+        local Folder = getEggFolder()
+
+        if not Folder then
+            debugWarn("Eggs", "Egg detector: workspace.Rendered.Generic not found")
+            return
+        end
+
+        DetectorSession += 1
+        local Session = DetectorSession
+
+        table.insert(DetectorConnections, Folder.ChildAdded:Connect(function()
+            if DetectorEnabled and Session == DetectorSession then
+                task.defer(checkClosest)
+            end
+        end))
+
+        table.insert(DetectorConnections, Folder.ChildRemoved:Connect(function()
+            if DetectorEnabled and Session == DetectorSession then
+                task.defer(checkClosest)
+            end
+        end))
+
+        task.spawn(function()
+            while DetectorEnabled and Session == DetectorSession do
+                checkClosest()
+                task.wait(CHECK_RATE)
+            end
+        end)
+    end
+
+    local function openEgg(EggName)
+        RemoteEvent:FireServer("HatchEgg", EggName, HATCH_AMOUNT)
+    end
+
+    local function startHatch()
+        HatchSession += 1
+        local Session = HatchSession
+
+        task.spawn(function()
+            while HatchEnabled and Session == HatchSession do
+                if SelectedEgg ~= "" then
+                    local Ok, Err = pcall(openEgg, SelectedEgg)
+
+                    if not Ok then
+                        debugWarn("Eggs", "openEgg failed:", Err)
+                    end
+                end
+
+                task.wait(OPEN_DELAY)
+            end
+        end)
+    end
+
+    addToggle(RiftBox, "Closest egg detector", false, function(Value)
+        DetectorEnabled = Value
+
+        if Value then
+            startDetector()
+        else
+            DetectorSession += 1
+            disconnectDetector()
+        end
+    end)
+
+    local function setAutoHatch(Value)
+        HatchEnabled = Value
+
+        if Value then
+            startHatch()
+        else
+            HatchSession += 1
+        end
+    end
+
+    local HatchToggle = addToggle(RiftBox, "Auto Hatch", false, setAutoHatch)
+
+    Features.AutoHatch = {
+        Toggle = HatchToggle,
+        SetEnabled = setAutoHatch,
+        IsEnabled = function()
+            return HatchEnabled
+        end,
+    }
+
+    registerShopFarmManagedFeature("Auto Hatch", HatchToggle, function()
+        return HatchEnabled
+    end)
+
+    onCleanup(function()
+        DetectorEnabled = false
+        DetectorSession += 1
+        disconnectDetector()
+        HatchEnabled = false
+        HatchSession += 1
+    end)
+
+
+    -- Names as they appear in workspace.Rendered.Rifts. Matching ignores case,
+    -- hyphens, spaces and underscores, so "cyber-egg" also matches "CyberEgg".
+    -- Use "Print rift names" to see what is currently spawned and add more here.
+    local RiftOptions = {
+        "atlantis-egg",
+        "classic-egg",
+        "crystal-egg",
+        "cyber-egg",
+        "gift-rift",
+        "golden-chest",
+        "hell-egg",
+        "iceshard-egg",
+        "icy-egg",
+        "inferno-egg",
+        "lava-egg",
+        "lunar-egg",
+        "magma-egg",
+        "mining-egg",
+        "neon-egg",
+        "nightmare-egg",
+        "rainbow-egg",
+        "shadow-rift",
+        "showman-egg",
+        "spikey-egg",
+        "spotted-egg",
+        "vine-egg",
+        "void-egg",
+    }
+
+    local SelectedRift = "gift-rift"
+
+    local TARGET_PART_NAME = "Display"  -- child of each rift to teleport to
+    local TP_HEIGHT = 3                 -- studs above the Display (slider below)
+    local CHECK_INTERVAL = 0.25         -- how often the watcher runs
+    local RETURN_DELAY = 1              -- seconds with no rift before returning (covers brief respawns)
+    local MAX_DRIFT = 15                -- re-teleport if knocked this far from the Display
+
+    local RiftEnabled = false
+    local RiftSession = 0
+    local OriginalPivot = nil
+
+    local function normalizeRiftName(Name)
+        return (tostring(Name):lower():gsub("[^%w]", ""))
+    end
+
+    local function getRiftFolder()
+        local Rendered = workspace:FindFirstChild("Rendered")
+        return Rendered and Rendered:FindFirstChild("Rifts")
+    end
+
+    -- The part we actually teleport to: the rift's Display, or the rift itself
+    -- if it has no Display.
+    local function getRiftTarget(Rift)
+        return Rift:FindFirstChild(TARGET_PART_NAME, true) or Rift
+    end
+
+    local function FindRifts()
+        local Rifts = {}
+        local Folder = getRiftFolder()
+
+        if not Folder then
+            return Rifts
+        end
+
+        local Wanted = normalizeRiftName(SelectedRift)
+
+        for _, Rift in ipairs(Folder:GetChildren()) do
+            if normalizeRiftName(Rift.Name) == Wanted then
+                table.insert(Rifts, Rift)
+            end
+        end
+
+        return Rifts
+    end
+
+    local function getClosestRift(Rifts)
+        local Root = getRoot()
+        local Closest, ClosestDist = nil, math.huge
+
+        for _, Rift in ipairs(Rifts) do
+            local TargetCFrame = getObjectCFrame(getRiftTarget(Rift))
+
+            if TargetCFrame then
+                local Dist = Root and (TargetCFrame.Position - Root.Position).Magnitude or 0
+
+                if Dist < ClosestDist then
+                    Closest, ClosestDist = Rift, Dist
+                end
+            end
+        end
+
+        return Closest
+    end
+
+    local function tptorift(Rift)
+        local Character = LocalPlayer.Character
+        local TargetCFrame = Rift and getObjectCFrame(getRiftTarget(Rift))
+
+        if not Character or not TargetCFrame then
+            return false
+        end
+
+        -- Only remember the starting spot once per trip
+        if not OriginalPivot then
+            OriginalPivot = Character:GetPivot()
+            debugPrint("Misc", "[Rift] Saved original position")
+        end
+
+        local Root = getRoot()
+        if Root then
+            Root.AssemblyLinearVelocity = Vector3.zero
+        end
+
+        Character:PivotTo(TargetCFrame + Vector3.new(0, TP_HEIGHT, 0))
+        return true
+    end
+
+    local function returnToOrigin()
+        if not OriginalPivot then
+            return
+        end
+
+        local Character = LocalPlayer.Character
+
+        if Character then
+            local Root = getRoot()
+            if Root then
+                Root.AssemblyLinearVelocity = Vector3.zero
+            end
+
+            pcall(function()
+                Character:PivotTo(OriginalPivot)
+            end)
+
+            debugPrint("Misc", "[Rift] Returned to the starting position")
+        end
+
+        OriginalPivot = nil
+    end
+
+    local function startWatcher()
+        RiftSession += 1
+        local Session = RiftSession
+
+        task.spawn(function()
+            local Current = nil
+            local GoneSince = nil
+
+            while RiftEnabled and Session == RiftSession do
+                -- The rift disappeared (destroyed or removed from workspace)
+                if Current and not Current:IsDescendantOf(workspace) then
+                    debugPrint("Misc", "[Rift] Rift disappeared")
+                    Current = nil
+                end
+
+                if not Current then
+                    local Rift = getClosestRift(FindRifts())
+
+                    if Rift then
+                        if tptorift(Rift) then
+                            Current = Rift
+                            GoneSince = nil
+                            debugPrint("Misc", "[Rift] Teleported to", Rift.Name)
+                        end
+                    elseif OriginalPivot then
+                        -- No rift left: wait a moment in case another spawns, then go back
+                        GoneSince = GoneSince or os.clock()
+
+                        if os.clock() - GoneSince >= RETURN_DELAY then
+                            returnToOrigin()
+                            GoneSince = nil
+                        end
+                    end
+                else
+                    -- Stay on the Display if something pushed us away
+                    local Root = getRoot()
+                    local TargetCFrame = getObjectCFrame(getRiftTarget(Current))
+
+                    if Root and TargetCFrame
+                        and (Root.Position - TargetCFrame.Position).Magnitude > MAX_DRIFT then
+                        tptorift(Current)
+                    end
+                end
+
+                task.wait(CHECK_INTERVAL)
+            end
+        end)
+    end
+
+    RiftBox:AddDropdown("Rift to teleport to", RiftOptions, SelectedRift, function(Value)
+        SelectedRift = Value
+    end)
+
+    RiftBox:AddSlider("Height above Display", 0, 20, TP_HEIGHT, function(Value)
+        TP_HEIGHT = Value
+    end)
+
+    addToggle(RiftBox, "Auto TP to rift", false, function(Value)
+        RiftEnabled = Value
+
+        if Value then
+            startWatcher()
+        else
+            RiftSession += 1
+            returnToOrigin()
+        end
+    end)
+
+    RiftBox:AddButton("Print rift names", function()
+        runDebugButton(function()
+            local Folder = getRiftFolder()
+
+            if not Folder then
+                debugWarn("Misc", "workspace.Rendered.Rifts not found")
+                return
+            end
+
+            local Children = Folder:GetChildren()
+
+            if #Children == 0 then
+                debugPrint("Misc", "No rifts are currently spawned")
+                return
+            end
+
+            for Index, Rift in ipairs(Children) do
+                debugPrint("Misc", Index, Rift.Name, Rift.ClassName)
+            end
+        end)
+    end)
+
+    RiftBox:AddButton("Diagnose rift teleport", function()
+        runDebugButton(function()
+            print("[Rift] Toggle enabled:", RiftEnabled)
+            print("[Rift] Selected rift:", SelectedRift)
+            print("[Rift] Saved original position:", OriginalPivot ~= nil)
+
+            local Folder = getRiftFolder()
+
+            if not Folder then
+                warn("[Rift] workspace.Rendered.Rifts NOT FOUND")
+                return
+            end
+
+            local Children = Folder:GetChildren()
+            print("[Rift] Children in Rifts folder:", #Children)
+
+            for Index, Rift in ipairs(Children) do
+                local Matches = normalizeRiftName(Rift.Name) == normalizeRiftName(SelectedRift)
+                local Display = Rift:FindFirstChild(TARGET_PART_NAME, true)
+
+                print(
+                    "[Rift]", Index,
+                    "name='" .. Rift.Name .. "'",
+                    Rift.ClassName,
+                    "matches:", Matches,
+                    "Display found:", Display ~= nil,
+                    Display and Display.ClassName or "",
+                    "has position:", getObjectCFrame(getRiftTarget(Rift)) ~= nil
+                )
+            end
+
+            print("[Rift] Matching rifts found:", #FindRifts())
+        end)
+    end)
+
+    onCleanup(function()
+        RiftEnabled = false
+        RiftSession += 1
+        returnToOrigin()
+    end)
+end
+
+----------------------------------------------------------
+-- 5.4d PRESENT RAIN
+----------------------------------------------------------
+
+do
+    local TP_HEIGHT = 3          -- studs above each item
+    local CHECK_INTERVAL = 0.25  -- how often the watcher looks for items
+    local RETURN_DELAY = 1       -- seconds with nothing left before returning
+    local ItemWait = 0.1         -- seconds spent on each item
+
+    local PresentEnabled = false
+    local PresentSession = 0
+    local OriginalPivot = nil
+    local PresentToggle
+
+    local function getPresentFolder()
+        local Rendered = workspace:FindFirstChild("Rendered")
+        return Rendered and Rendered:FindFirstChild("PresentRain")
+    end
+
+    local function returnToOrigin()
+        if not OriginalPivot then
+            return
+        end
+
+        local Character = LocalPlayer.Character
+
+        if Character then
+            local Root = getRoot()
+            if Root then
+                Root.AssemblyLinearVelocity = Vector3.zero
+            end
+
+            pcall(function()
+                Character:PivotTo(OriginalPivot)
+            end)
+
+            debugPrint("Misc", "[Present Rain] Returned to the starting position")
+        end
+
+        OriginalPivot = nil
+    end
+
+    local function tpToItem(Item)
+        local Character = LocalPlayer.Character
+        local TargetCFrame = Item and getObjectCFrame(Item)
+
+        if not Character or not TargetCFrame then
+            return false
+        end
+
+        -- Only remember the starting spot once per trip
+        if not OriginalPivot then
+            OriginalPivot = Character:GetPivot()
+            debugPrint("Misc", "[Present Rain] Saved original position")
+        end
+
+        local Root = getRoot()
+        if Root then
+            Root.AssemblyLinearVelocity = Vector3.zero
+        end
+
+        Character:PivotTo(TargetCFrame + Vector3.new(0, TP_HEIGHT, 0))
+        return true
+    end
+
+    local function startWatcher()
+        PresentSession += 1
+        local Session = PresentSession
+
+        task.spawn(function()
+            local GoneSince = nil
+
+            while PresentEnabled and Session == PresentSession do
+                local Folder = getPresentFolder()
+                local Items = Folder and Folder:GetChildren() or {}
+
+                if #Items > 0 then
+                    GoneSince = nil
+
+                    for _, Item in ipairs(Items) do
+                        if not PresentEnabled or Session ~= PresentSession then
+                            break
+                        end
+
+                        -- Items can vanish while we're still working through the list
+                        if Item.Parent and tpToItem(Item) then
+                            task.wait(ItemWait)
+                        end
+                    end
+                else
+                    -- Nothing left: wait a moment in case more drop, then go back
+                    if OriginalPivot then
+                        GoneSince = GoneSince or os.clock()
+
+                        if os.clock() - GoneSince >= RETURN_DELAY then
+                            returnToOrigin()
+                            GoneSince = nil
+                        end
+                    end
+                end
+
+                task.wait(CHECK_INTERVAL)
+            end
+        end)
+    end
+
+    GiftBox:AddSlider("Wait per item (x0.1s)", 0, 10, ItemWait * 10, function(Value)
+        ItemWait = Value / 10
+    end)
+
+    PresentToggle = addToggle(GiftBox, "Auto TP to presents", false, function(Value)
+        PresentEnabled = Value
+
+        if Value then
+            startWatcher()
+        else
+            PresentSession += 1
+            returnToOrigin()
+        end
+    end)
+
+    -- Shop Farm turns this off while it farms, then turns it back on afterwards
+    registerShopFarmManagedFeature("Present Rain TP", PresentToggle, function()
+        return PresentEnabled
+    end)
+
+    GiftBox:AddButton("Print present rain children", function()
+        runDebugButton(function()
+            local Folder = getPresentFolder()
+
+            if not Folder then
+                debugWarn("Misc", "workspace.Rendered.PresentRain not found")
+                return
+            end
+
+            local Children = Folder:GetChildren()
+
+            if #Children == 0 then
+                debugPrint("Misc", "PresentRain is empty")
+                return
+            end
+
+            for Index, Item in ipairs(Children) do
+                debugPrint("Misc", Index, Item.Name, Item.ClassName)
+            end
+        end)
+    end)
+
+    onCleanup(function()
+        PresentEnabled = false
+        PresentSession += 1
+        returnToOrigin()
+    end)
+end
+
+----------------------------------------------------------
+-- ANTI-AFK
+----------------------------------------------------------
+
+local bb = game:service'VirtualUser'
+
+game:service'Players'.LocalPlayer.Idled:connect(function()
+    bb:CaptureController()
+    bb:ClickButton2(Vector2.new())
+end)
